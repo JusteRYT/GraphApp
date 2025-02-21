@@ -10,24 +10,30 @@ from matplotlib.patches import Rectangle
 # Используем TkAgg
 matplotlib.use("TkAgg")
 plt.style.use('dark_background')
-
-# git commit -m "init: Настроено базовое приложение с TkAgg и dark_background для matplotlib"
+# git commit -m "init: Базовая настройка TkAgg и dark_background для matplotlib"
 
 class CSVGraphApp:
     """
     /**
      * Класс CSVGraphApp для отображения state timeline из CSV.
-     * По оси X располагаются seq пакетов с соответствующим цветом:
-     * - type = -1 (lost) – красный,
-     * - type = 1 (received) – зеленый,
-     * - type = 2 (resend) – желтый.
+     * По оси X располагаются квадраты, каждый из которых соответствует одному seq.
+     * Цвет квадрата определяется итоговым состоянием:
+     *   - type = -1 (lost) – красный,
+     *   - type = 1 (received) – зеленый,
+     *   - type = 2 (resend) – желтый.
      *
-     * Логика итогового состояния для каждого seq:
-     * Если для seq есть хотя бы один event с type=2, итоговый статус – 2 (желтый);
-     * иначе, если есть хотя бы один event с type=1, итоговый статус – 1 (зеленый);
-     * иначе – статус -1 (красный).
+     * Логика определения итогового состояния:
+     *   Если в группе для seq присутствует хотя бы один event с type=2, итоговый статус = 2.
+     *   Иначе, если есть event с type=1, итоговый статус = 1.
+     *   Иначе – итоговый статус = -1.
      *
-     * При наведении на квадрат отображается tooltip с подробной информацией.
+     * Для final_state == 2 tooltip формируется особым образом:
+     *   Находится первый event с type=2 и последний event с type=-1, предшествующий ему.
+     *   В tooltip выводится: время потери и время восстановления.
+     *
+     * На нижней части окна отображается сводная таблица подсчета.
+     *
+     * При запуске программы график не отображается до загрузки CSV.
      */
     """
     def __init__(self, root):
@@ -54,8 +60,8 @@ class CSVGraphApp:
         self.last_patch = None
         self.update_interval = 0.1  # интервал обновления tooltip (100 мс)
         self.last_update_time = 0
-        self.bar_patches = []  # для хранения объектов квадратов (patches)
-        self.seq_info = []     # для хранения агрегированной информации по seq
+        self.bar_patches = []  # список объектов-квадратов для tooltip
+        self.seq_info = []     # список агрегированной информации по seq
 
         self.select_button = tk.Button(
             control_frame, text="Выбрать CSV файл", command=self.load_csv,
@@ -77,8 +83,8 @@ class CSVGraphApp:
 
         self.create_checkboxes()
 
-        # Область для графика (размер можно уменьшить по высоте, т.к. y не используется)
-        self.figure, self.ax = plt.subplots(figsize=(8, 2), facecolor="#2E2E2E")
+        # Область для графика (отображается только после загрузки CSV)
+        self.figure, self.ax = plt.subplots(figsize=(8, 4), facecolor="#2E2E2E")
         self.canvas = FigureCanvasTkAgg(self.figure, master=root)
         self.canvas.get_tk_widget().pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
 
@@ -91,7 +97,7 @@ class CSVGraphApp:
             elif isinstance(child, tk.Label):
                 child.config(bg="#404040", fg="white")
 
-        self.data = None
+        self.data = None  # данные CSV
         self.canvas.mpl_connect("motion_notify_event", self.on_hover)
 
         # Цвета для состояний
@@ -100,6 +106,7 @@ class CSVGraphApp:
             1: "#00FF00",   # received – зеленый
             2: "#FFD700"    # resend – желтый
         }
+        # Изначально график не рисуется до загрузки CSV
         # git commit -m "feat: Инициализирован интерфейс, область графика и tooltip"
 
     def center_half_screen(self):
@@ -182,9 +189,14 @@ class CSVGraphApp:
          * - Для каждого seq определяет итоговое состояние:
          *      Если есть event с type=2 (resend) -> итоговый статус 2 (желтый);
          *      иначе если есть event с type=1 (received) -> итоговый статус 1 (зеленый);
-         *      иначе – статус -1 (lost, красный).
-         * - По оси X размещаются квадраты (размер 1x1) для каждого seq.
-         * - Сохраняется информация для отображения tooltip.
+         *      иначе -> статус -1 (lost, красный).
+         * - Если итоговый статус 2, то в tooltip оставляем только информацию о resend:
+         *      определяется время потери (последний event с type=-1 до первого type=2)
+         *      и время восстановления (первый event с type=2).
+         * - По оси X размещаются квадраты (размер 1x1) для каждого seq, разделенные зазором.
+         * - Таймлайн отрисовывается на верхней половине графика.
+         * - Устанавливаются xticks с номерами seq.
+         * - В нижней части окна выводится сводная таблица подсчета.
          */
         """
         if self.data is None or self.data.empty:
@@ -200,10 +212,7 @@ class CSVGraphApp:
             group = group.sort_values("timestamp")
             events = group.to_dict('records')
             types = group["type"].tolist()
-            # Логика определения итогового состояния:
-            # Если есть хотя бы один event с type=2 -> итоговый статус 2 (resend)
-            # иначе, если есть хотя бы один event с type=1 -> статус 1 (received)
-            # иначе -> статус -1 (lost)
+            # Определяем итоговое состояние:
             if 2 in types:
                 final_state = 2
             elif 1 in types:
@@ -213,17 +222,35 @@ class CSVGraphApp:
             else:
                 final_state = -1
 
-            tooltip_parts = []
-            if self.check_vars["seq"].get():
-                tooltip_parts.append(f"Seq: {seq}")
-            if self.check_vars["timestamp"].get():
+            # Если итоговый статус 2, оставляем только данные о resend
+            if final_state == 2:
+                resend_event = None
+                lost_event = None
                 for event in events:
-                    tooltip_parts.append(f"Timestamp: {event['timestamp'].strftime('%Y-%m-%d %H:%M:%S')}")
-            if self.check_vars["type"].get():
-                tooltip_parts.append("Events: " + ", ".join(str(event["type"]) for event in events))
-            if self.check_vars["count"].get():
-                tooltip_parts.append("Count: " + ", ".join(str(event["count"]) for event in events))
-            tooltip_text = "\n".join(tooltip_parts)
+                    if event["type"] == 2:
+                        resend_event = event
+                        break
+                    elif event["type"] == -1:
+                        lost_event = event
+                if lost_event and resend_event:
+                    tooltip_text = (f"Seq: {seq}\n"
+                                    f"Lost: {lost_event['timestamp'].strftime('%Y-%m-%d %H:%M:%S')}\n"
+                                    f"Recovered: {resend_event['timestamp'].strftime('%Y-%m-%d %H:%M:%S')}")
+                else:
+                    tooltip_text = (f"Seq: {seq}\nResend at: {resend_event['timestamp'].strftime('%Y-%m-%d %H:%M:%S')}"
+                                    if resend_event else f"Seq: {seq}")
+            else:
+                tooltip_parts = []
+                if self.check_vars["seq"].get():
+                    tooltip_parts.append(f"Seq: {seq}")
+                if self.check_vars["timestamp"].get():
+                    for event in events:
+                        tooltip_parts.append(f"{event['timestamp'].strftime('%Y-%m-%d %H:%M:%S')}")
+                if self.check_vars["type"].get():
+                    tooltip_parts.append("Events: " + ", ".join(str(event["type"]) for event in events))
+                if self.check_vars["count"].get():
+                    tooltip_parts.append("Count: " + ", ".join(str(event["count"]) for event in events))
+                tooltip_text = "\n".join(tooltip_parts)
             self.seq_info.append({
                 "seq": seq,
                 "final_state": final_state,
@@ -234,22 +261,68 @@ class CSVGraphApp:
         # Сортируем информацию по seq (по возрастанию)
         self.seq_info.sort(key=lambda x: x["seq"])
 
-        # Отрисовка timeline: для каждого seq рисуем квадрат размером 1x1, x = порядковый индекс
+        # Параметры для отрисовки: квадрат и зазор
+        square_width = 0.8
+        gap = 0.2
+        y_coord = 0.5  # отрисовка на верхней половине (y от 0.5 до 1)
         for idx, info in enumerate(self.seq_info):
             color = self.colors.get(info["final_state"], "#FFFFFF")
-            patch = self.ax.add_patch(Rectangle((idx, 0), 1, 1, color=color))
+            x = idx * (square_width + gap)
+            patch = self.ax.add_patch(Rectangle((x, y_coord), square_width, 0.5, color=color))
             self.bar_patches.append(patch)
 
-        self.ax.set_xlim(0, len(self.seq_info))
+        total_seq = len(self.seq_info)
+        self.ax.set_xlim(0, total_seq * (square_width + gap))
         self.ax.set_ylim(0, 1)
         self.ax.axis("off")
+
+        # Устанавливаем xticks по центру каждого квадрата с номерами seq
+        xticks = []
+        xlabels = []
+        for idx, info in enumerate(self.seq_info):
+            x_center = idx * (square_width + gap) + square_width / 2
+            xticks.append(x_center)
+            xlabels.append(str(info["seq"]))
+        self.ax.set_xticks(xticks)
+        self.ax.set_xticklabels(xlabels, color="white", rotation=45, fontsize=10)
+
         self.canvas.draw()
-        # git commit -m "feat: Реализована отрисовка state timeline с квадратами по seq"
+        # git commit -m "feat: Реализована отрисовка state timeline с разделением квадратов и подписями seq"
+
+        self.update_summary_table()
+
+    def update_summary_table(self):
+        """
+        /**
+         * Вычисляет и обновляет сводную таблицу:
+         *   totalReceived = количество seq с final_state 1 или 2
+         *   totalLost = количество seq с final_state -1
+         *   lossRatio = (totalLost / общее количество seq) * 100%
+         *   RecoveryRatio = (количество seq с final_state 2 / (количество seq с final_state 2 + -1)) * 100%
+         */
+        """
+        total_seq = len(self.seq_info)
+        totalReceived = sum(1 for info in self.seq_info if info["final_state"] in [1, 2])
+        totalLost = sum(1 for info in self.seq_info if info["final_state"] == -1)
+        recovery_count = sum(1 for info in self.seq_info if info["final_state"] == 2)
+        lossRatio = (totalLost / total_seq * 100) if total_seq > 0 else 0
+        denominator = (totalLost + recovery_count)
+        RecoveryRatio = (recovery_count / denominator * 100) if denominator > 0 else 0
+        summary_text = (f"Total Received: {totalReceived}\n"
+                        f"Total Lost: {totalLost}\n"
+                        f"Loss Ratio: {lossRatio:.1f}%\n"
+                        f"Recovery Ratio: {RecoveryRatio:.1f}%")
+        if not hasattr(self, "summary_label"):
+            self.summary_label = tk.Label(self.root, text=summary_text, font=self.font, bg="#2E2E2E", fg="white")
+            self.summary_label.pack(side=tk.BOTTOM, pady=10)
+        else:
+            self.summary_label.config(text=summary_text)
+        # git commit -m "feat: Добавлена сводная таблица подсчета пакетов"
 
     def on_hover(self, event):
         """
         /**
-         * Обрабатывает событие hover: при наведении на квадрат показывается tooltip.
+         * Обрабатывает событие наведения мыши: при наведении на квадрат показывается tooltip.
          */
         """
         current_time = time.time()
