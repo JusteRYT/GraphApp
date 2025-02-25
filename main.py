@@ -12,8 +12,6 @@ matplotlib.use("TkAgg")
 plt.style.use('dark_background')
 
 
-# git commit -m "init: Базовая настройка TkAgg и dark_background для matplotlib"
-
 class CSVGraphApp:
     """
     /**
@@ -36,16 +34,16 @@ class CSVGraphApp:
      * Сводная таблица (в левом нижнем углу) подсчитывает:
      *   Total Received, Total Lost, Loss Ratio, Recovery Ratio.
      *
-     * При запуске программы основной контейнер с графиком сразу отображается (график может быть пустым).
+     * При запуске программы основной контейнер с графиком не отображается до загрузки CSV.
      */
     """
 
     def __init__(self, root):
         """
-        /**
-         * Конструктор класса.
-         * @param root Корневое окно Tkinter.
-         */
+         /**
+          * Конструктор класса.
+          * @param root Корневое окно Tkinter.
+          */
         """
         self.root = root
         self.root.title("State Timeline из CSV")
@@ -87,7 +85,7 @@ class CSVGraphApp:
 
         # --- Основной контейнер с графиком и сводной таблицей ---
         self.main_frame = tk.Frame(self.root, bg="#2E2E2E")
-        self.main_frame.pack(fill=tk.BOTH, expand=True)
+        # Пока не отображаем main_frame до загрузки CSV
 
         # Фрейм для графика (занимает основную часть)
         self.graph_frame = tk.Frame(self.main_frame, bg="#2E2E2E")
@@ -97,44 +95,46 @@ class CSVGraphApp:
         self.summary_frame = tk.Frame(self.main_frame, bg="#2E2E2E")
         self.summary_frame.pack(side=tk.BOTTOM, anchor="w", fill=tk.X, padx=10, pady=10)
 
-        # Создаем фигуру и ось для графика (график отрисовывается на верхней половине)
+        # Создаем фигуру и ось для графика (начальный размер задаем как (8,4))
         self.figure, self.ax = plt.subplots(figsize=(8, 4), facecolor="#2E2E2E")
         self.canvas = FigureCanvasTkAgg(self.figure, master=self.graph_frame)
         self.canvas.get_tk_widget().pack(fill=tk.BOTH, expand=True)
-        # Панель инструментов: теперь создаем её и упаковываем в toolbar_frame
+        # Панель инструментов – упаковываем в toolbar_frame (выше всех)
         self.toolbar = NavigationToolbar2Tk(self.canvas, self.toolbar_frame, pack_toolbar=False)
         self.toolbar.pack(side=tk.TOP, fill=tk.X)
+
+        # Выделение по hover реализуем через изменение обводки
+        self.selected_patch = None
 
         self.tooltip_window = None
         self.last_patch = None
         self.update_interval = 0.1  # интервал обновления tooltip (100 мс)
         self.last_update_time = 0
-        self.bar_patches = []  # список объектов-квадратов для tooltip
+        self.bar_patches = []  # список объектов-квадратов
         self.seq_info = []  # список агрегированной информации по seq
 
         self.data = None  # данные CSV
         self.canvas.mpl_connect("motion_notify_event", self.on_hover)
 
-        # Цвета для состояний
         self.colors = {
             -1: "#FF0000",  # lost – красный
             1: "#00FF00",  # received – зеленый
             2: "#FFD700"  # resend – желтый
         }
-        # git commit -m "feat: Инициализирован интерфейс, навигационная панель вынесена наверх"
 
     def center_half_screen(self):
         """
-        /**
-         * Центрирует окно, устанавливая его размер половиной экрана (но не больше 1280x720).
-         */
+         /**
+          * Центрирует окно, устанавливая его размер половиной экрана (но не больше 1920x1080).
+          */
         """
         screen_width = self.root.winfo_screenwidth()
         screen_height = self.root.winfo_screenheight()
+        print(f"[DEBUG] screen_width: {screen_width}, screen_height: {screen_height}")
         width = int(screen_width * 0.5)
         height = int(screen_height * 0.5)
-        max_width = 1280
-        max_height = 720
+        max_width = 2560
+        max_height = 1440
         width = min(width, max_width)
         height = min(height, max_height)
         x = int((screen_width - width) / 2)
@@ -142,13 +142,12 @@ class CSVGraphApp:
         geometry_str = f"{width}x{height}+{x}+{y}"
         print(f"[DEBUG] Устанавливаем geometry: {geometry_str}", flush=True)
         self.root.geometry(geometry_str)
-        # git commit -m "refactor: Добавлена функция центрирования окна"
 
     def create_checkboxes(self):
         """
-        /**
-         * Создает чекбоксы для выбора информации, отображаемой в tooltip.
-         */
+         /**
+          * Создает чекбоксы для выбора информации, отображаемой в tooltip.
+          */
         """
         self.check_vars = {
             "seq": tk.BooleanVar(value=True),
@@ -162,17 +161,15 @@ class CSVGraphApp:
             side=tk.LEFT, padx=5)
         ttk.Checkbutton(check_frame, text="Show timestamp", variable=self.check_vars["timestamp"],
                         style="TCheckbutton").pack(side=tk.LEFT, padx=5)
-        ttk.Checkbutton(check_frame, text="Show event", variable=self.check_vars["events"],
-                        style="TCheckbutton").pack(side=tk.LEFT, padx=5)
-        ttk.Checkbutton(check_frame, text="Show count", variable=self.check_vars["count"],
-                        style="TCheckbutton").pack(side=tk.LEFT, padx=5)
-        # При изменении значений обновляем tooltip, если он открыт
+        ttk.Checkbutton(check_frame, text="Show event", variable=self.check_vars["events"], style="TCheckbutton").pack(
+            side=tk.LEFT, padx=5)
+        ttk.Checkbutton(check_frame, text="Show count", variable=self.check_vars["count"], style="TCheckbutton").pack(
+            side=tk.LEFT, padx=5)
         for var in self.check_vars.values():
             var.trace_add("write", lambda *args: self.update_visible_tooltip())
-        # git commit -m "feat: Изменены подписи чекбоксов и добавлено обновление tooltip при изменении"
 
     def update_visible_tooltip(self):
-        """Если tooltip открыт, пересчитываем его текст с учетом новых настроек."""
+        """Если tooltip открыт, обновляем его текст с учётом текущих настроек."""
         if self.tooltip_window and self.last_patch:
             tooltip_text = self.get_tooltip_text(self.last_patch)
             for widget in self.tooltip_window.winfo_children():
@@ -180,9 +177,9 @@ class CSVGraphApp:
 
     def load_csv(self):
         """
-        /**
-         * Загружает CSV-файл и проверяет наличие столбцов 'timestamp', 'seq', 'type'.
-         */
+         /**
+          * Загружает CSV и проверяет наличие столбцов 'timestamp', 'seq', 'type'.
+          */
         """
         file_path = filedialog.askopenfilename(filetypes=[("CSV files", "*.csv")])
         if not file_path:
@@ -195,38 +192,31 @@ class CSVGraphApp:
             df["type"] = df["type"].astype(int)
             if "count" not in df.columns:
                 df["count"] = 1
-            # Преобразуем timestamp
             df["timestamp"] = pd.to_datetime(df["timestamp"], unit="s", errors="coerce")
             df = df.dropna(subset=["timestamp"])
             self.data = df
             self.file_label.config(text=f"Выбран файл: {file_path.split('/')[-1]}")
             self.plot_button.config(state=tk.NORMAL)
-            print(f"[INFO] Загружено {len(self.data)} строк. Пример:\n{self.data.head()}", flush=True)
+            print(f"[INFO] Загружено {len(self.data)} строк.", flush=True)
+            # Отображаем основной контейнер, если он ещё не отображён
+            if not self.main_frame.winfo_ismapped():
+                self.main_frame.pack(fill=tk.BOTH, expand=True)
             self.plot_graph()
-            # git commit -m "feat: Реализована загрузка и предварительная обработка CSV"
         except Exception as e:
             print(f"[ERROR] Ошибка при загрузке CSV: {e}", flush=True)
             self.file_label.config(text=f"Ошибка: {e}")
             self.plot_button.config(state=tk.DISABLED)
-            # git commit -m "fix: Обработка ошибок при загрузке CSV"
 
     def plot_graph(self):
         """
-        /**
-         * Строит state timeline:
-         * - Группирует данные по 'seq'.
-         * - Для каждого seq определяет итоговое состояние:
-         *      Если есть event с type=2 (resend) -> итоговый статус 2 (желтый);
-         *      иначе если есть event с type=1 (received) -> итоговый статус 1 (зеленый);
-         *      иначе -> статус -1 (lost, красный).
-         * - Если итоговый статус 2, то в tooltip оставляем только информацию о resend:
-         *      определяется время потери (последний event с type=-1 до первого type=2)
-         *      и время восстановления (первый event с type=2).
-         * - По оси X размещаются квадраты (размер 1x1) для каждого seq, разделенные зазором.
-         * - Таймлайн отрисовывается на верхней половине графика.
-         * - Устанавливаются xticks с номерами seq (без поворота).
-         * - В summary_frame (в левом нижнем углу) выводится сводная таблица подсчета.
-         */
+         /**
+          * Строит state timeline:
+          * - Группирует данные по 'seq' и определяет итоговое состояние.
+          * - Если final_state == 2, tooltip показывает только время потери и восстановления.
+          * - Отрисовывает квадраты (размер 1x1) с зазором по оси X, устанавливает xticks (без поворота).
+          * - Сводная таблица выводится в summary_frame.
+          * - Размер фигуры обновляется динамически, чтобы показать все элементы.
+          */
         """
         if self.data is None or self.data.empty:
             return
@@ -235,7 +225,6 @@ class CSVGraphApp:
         self.bar_patches.clear()
         self.seq_info.clear()
 
-        # Группируем данные по seq
         grouped = self.data.groupby("seq")
         for seq, group in grouped:
             group = group.sort_values("timestamp")
@@ -250,7 +239,6 @@ class CSVGraphApp:
             else:
                 final_state = -1
 
-            # Если итоговый статус 2, оставляем только данные о resend (показ lost и recovered)
             if final_state == 2:
                 resend_event = None
                 lost_event = None
@@ -268,21 +256,18 @@ class CSVGraphApp:
                     tooltip_text = (f"Seq: {seq}\nResend at: {resend_event['timestamp'].strftime('%Y-%m-%d %H:%M:%S')}"
                                     if resend_event else f"Seq: {seq}")
             else:
-                # Здесь мы не сохраняем tooltip заранее – оно будет вычисляться динамически
                 tooltip_text = None
             self.seq_info.append({
                 "seq": seq,
                 "final_state": final_state,
-                "events": events  # сохраняем события для динамического вычисления tooltip
+                "events": events
             })
 
-        # Сортируем информацию по seq (по возрастанию)
         self.seq_info.sort(key=lambda x: x["seq"])
 
-        # Параметры для отрисовки: квадрат и зазор
         square_width = 0.8
         gap = 0.2
-        y_coord = 0.5  # отрисовка на верхней половине (y от 0.5 до 1)
+        y_coord = 0.5
         for idx, info in enumerate(self.seq_info):
             color = self.colors.get(info["final_state"], "#FFFFFF")
             x = idx * (square_width + gap)
@@ -296,7 +281,7 @@ class CSVGraphApp:
         self.ax.spines["top"].set_visible(False)
         self.ax.spines["left"].set_visible(False)
         self.ax.spines["right"].set_visible(False)
-        # Устанавливаем xticks по центру каждого квадрата (без поворота подписей)
+
         xticks = []
         xlabels = []
         for idx, info in enumerate(self.seq_info):
@@ -306,19 +291,18 @@ class CSVGraphApp:
         self.ax.set_xticks(xticks)
         self.ax.set_xticklabels(xlabels, color="white", rotation=0, fontsize=10)
 
+        new_width = max(8, total_seq * (square_width + gap))
+        self.figure.set_size_inches(new_width, 4, forward=True)
         self.canvas.draw()
-        # git commit -m "feat: Отрисовка state timeline с квадратами и подписями seq (без поворота)"
+        # git commit -m "feat: Динамическое изменение размера графика для показа всех элементов"
+
         self.update_summary_table()
 
     def update_summary_table(self):
         """
-        /**
-         * Вычисляет и обновляет сводную таблицу:
-         *   totalReceived = количество seq с final_state 1 или 2
-         *   totalLost = количество seq с final_state -1
-         *   lossRatio = (totalLost / общее количество seq) * 100%
-         *   RecoveryRatio = (количество seq с final_state 2 / (количество seq с final_state 2 + -1)) * 100%
-         */
+         /**
+          * Вычисляет и обновляет сводную таблицу подсчёта.
+          */
         """
         total_seq = len(self.seq_info)
         totalReceived = sum(1 for info in self.seq_info if info["final_state"] in [1, 2])
@@ -337,15 +321,13 @@ class CSVGraphApp:
             self.summary_label.pack(side=tk.LEFT, anchor="w", padx=5, pady=5)
         else:
             self.summary_label.config(text=summary_text)
-        # git commit -m "feat: Обновлена сводная таблица подсчета пакетов с рамкой, размещена в левом нижнем углу"
+        # git commit -m "feat: Обновлена сводная таблица, размещена в левом нижнем углу"
 
     def get_tooltip_text(self, patch):
         """
-        /**
-         * Генерирует текст для tooltip по данным seq, вычисляя его динамически на основе текущих значений чекбоксов.
-         * @param patch Объект квадрата, на который наведён курсор.
-         * @return Текст для tooltip.
-         */
+         /**
+          * Вычисляет текст tooltip динамически на основе текущих значений чекбоксов.
+          */
         """
         try:
             index = self.bar_patches.index(patch)
@@ -354,7 +336,6 @@ class CSVGraphApp:
             events = info["events"]
             final_state = info["final_state"]
             if final_state == 2:
-                # Для resend выводим только время потери и восстановления
                 resend_event = None
                 lost_event = None
                 for event in events:
@@ -390,39 +371,54 @@ class CSVGraphApp:
 
     def on_hover(self, event):
         """
-        /**
-         * Обрабатывает событие наведения мыши: при наведении на квадрат показывается tooltip.
-         */
+         /**
+          * При наведении на квадрат отображается tooltip и выделяется квадрат.
+          * Если мышь не над ни одним patch, tooltip удаляется.
+          */
         """
         current_time = time.time()
         if current_time - self.last_update_time < self.update_interval:
             return
         self.last_update_time = current_time
+
         current_patch = None
         for patch in self.bar_patches:
             if patch.contains(event)[0]:
                 current_patch = patch
                 break
-        if current_patch == self.last_patch:
+
+        # Если мышь не над ни одним patch, убираем tooltip и сбрасываем выделение
+        if current_patch is None:
+            if self.tooltip_window:
+                self.tooltip_window.destroy()
+                self.tooltip_window = None
+            if self.last_patch:
+                self.last_patch.set_linewidth(0)
+                self.last_patch.set_edgecolor(None)
+                self.last_patch = None
+            self.canvas.draw_idle()
             return
-        if self.tooltip_window:
-            self.tooltip_window.destroy()
-            self.tooltip_window = None
-        self.last_patch = current_patch
-        if current_patch:
+
+        if current_patch != self.last_patch:
+            if self.last_patch is not None:
+                self.last_patch.set_linewidth(0)
+                self.last_patch.set_edgecolor(None)
+            self.last_patch = current_patch
+            current_patch.set_linewidth(3)
+            current_patch.set_edgecolor("white")
+            self.canvas.draw_idle()
             tooltip_text = self.get_tooltip_text(current_patch)
             self.show_tooltip(event, tooltip_text)
-        # git commit -m "feat: Реализована логика показа tooltip при наведении на квадрат"
 
     def show_tooltip(self, event, text):
         """
-        /**
-         * Отображает tooltip рядом с курсором.
-         * @param event Событие наведения мыши.
-         * @param text Текст для отображения.
-         */
+         /**
+          * Отображает tooltip рядом с курсором.
+          */
         """
         x_root, y_root = self.root.winfo_pointerxy()
+        if self.tooltip_window:
+            self.tooltip_window.destroy()
         self.tooltip_window = tk.Toplevel(self.root)
         self.tooltip_window.wm_overrideredirect(1)
         self.tooltip_window.wm_geometry(f"+{x_root + 10}+{y_root + 10}")
@@ -432,9 +428,9 @@ class CSVGraphApp:
 
     def remove_tooltip(self):
         """
-        /**
-         * Удаляет tooltip, если он отображается.
-         */
+         /**
+          * Удаляет tooltip, если он отображается.
+          */
         """
         if self.tooltip_window:
             self.tooltip_window.destroy()
