@@ -14,28 +14,28 @@ plt.style.use('dark_background')
 
 class CSVGraphApp:
     """
-    /**
-     * Класс CSVGraphApp для отображения state timeline из CSV.
-     * По оси X располагаются квадраты, каждый из которых соответствует одному seq.
-     * Цвет квадрата определяется итоговым состоянием:
-     *   - type = -1 (lost) – красный,
-     *   - type = 1 (received) – зеленый,
-     *   - type = 2 (resend) – желтый.
-     *
-     * Логика определения итогового состояния:
-     *   Если в группе для seq присутствует хотя бы один event с type=2, итоговый статус = 2.
-     *   Иначе, если есть event с type=1, итоговый статус = 1.
-     *   Иначе – итоговый статус = -1.
-     *
-     * Для final_state == 2 tooltip формируется особым образом:
-     *   Находится первый event с type=2 и последний event с type=-1, предшествующий ему.
-     *   В tooltip выводится: время потери и время восстановления.
-     *
-     * Сводная таблица (в левом нижнем углу) подсчитывает:
-     *   Total Received, Total Lost, Loss Ratio, Recovery Ratio.
-     *
-     * При запуске программы основной контейнер с графиком не отображается до загрузки CSV.
-     */
+     /**
+      * Класс CSVGraphApp для отображения state timeline из CSV.
+      * По оси X располагаются квадраты, каждый из которых соответствует одному seq.
+      * Цвет квадрата определяется итоговым состоянием:
+      *   - type = -1 (lost) – красный,
+      *   - type = 1 (received) – зеленый,
+      *   - type = 2 (resend) – желтый.
+      *
+      * Логика определения итогового состояния:
+      *   Если в группе для seq присутствует хотя бы один event с type=2, итоговый статус = 2.
+      *   Иначе, если есть event с type=1, итоговый статус = 1.
+      *   Иначе – итоговый статус = -1.
+      *
+      * Для final_state == 2 tooltip формируется особым образом:
+      *   Находится первый event с type=2 и последний event с type=-1, предшествующий ему.
+      *   В tooltip выводится: время потери и время восстановления.
+      *
+      * Сводная таблица (в левом нижнем углу) подсчитывает:
+      *   Total Received, Total Lost, Loss Ratio, Recovery Ratio.
+      *
+      * При запуске программы основной контейнер с графиком не отображается до загрузки CSV.
+      */
     """
 
     def __init__(self, root):
@@ -118,8 +118,8 @@ class CSVGraphApp:
 
         self.colors = {
             -1: "#FF0000",  # lost – красный
-            1: "#00FF00",  # received – зеленый
-            2: "#FFD700"  # resend – желтый
+            1: "#00FF00",   # received – зеленый
+            2: "#FFD700"    # resend – желтый
         }
 
     def center_half_screen(self):
@@ -130,7 +130,7 @@ class CSVGraphApp:
         """
         screen_width = self.root.winfo_screenwidth()
         screen_height = self.root.winfo_screenheight()
-        print(f"[DEBUG] screen_width: {screen_width}, screen_height: {screen_height}")
+        # [REFAC] Убраны лишние отладочные print'ы
         width = int(screen_width * 0.5)
         height = int(screen_height * 0.5)
         max_width = 2560
@@ -140,7 +140,6 @@ class CSVGraphApp:
         x = int((screen_width - width) / 2)
         y = int((screen_height - height) / 2)
         geometry_str = f"{width}x{height}+{x}+{y}"
-        print(f"[DEBUG] Устанавливаем geometry: {geometry_str}", flush=True)
         self.root.geometry(geometry_str)
 
     def create_checkboxes(self):
@@ -166,7 +165,7 @@ class CSVGraphApp:
         ttk.Checkbutton(check_frame, text="Show count", variable=self.check_vars["count"], style="TCheckbutton").pack(
             side=tk.LEFT, padx=5)
         for var in self.check_vars.values():
-            var.trace_add("write", lambda *args: self.update_visible_tooltip())
+            var.trace_add("write", lambda name, index, mode: self.update_visible_tooltip())
 
     def update_visible_tooltip(self):
         """Если tooltip открыт, обновляем его текст с учётом текущих настроек."""
@@ -185,7 +184,6 @@ class CSVGraphApp:
         if not file_path:
             return
         try:
-            print(f"[INFO] Открываем файл: {file_path}", flush=True)
             df = pd.read_csv(file_path)
             if not {"timestamp", "seq", "type"}.issubset(df.columns):
                 raise ValueError("CSV не содержит столбцы: timestamp, seq, type")
@@ -197,13 +195,11 @@ class CSVGraphApp:
             self.data = df
             self.file_label.config(text=f"Выбран файл: {file_path.split('/')[-1]}")
             self.plot_button.config(state=tk.NORMAL)
-            print(f"[INFO] Загружено {len(self.data)} строк.", flush=True)
             # Отображаем основной контейнер, если он ещё не отображён
             if not self.main_frame.winfo_ismapped():
                 self.main_frame.pack(fill=tk.BOTH, expand=True)
             self.plot_graph()
         except Exception as e:
-            print(f"[ERROR] Ошибка при загрузке CSV: {e}", flush=True)
             self.file_label.config(text=f"Ошибка: {e}")
             self.plot_button.config(state=tk.DISABLED)
 
@@ -291,10 +287,19 @@ class CSVGraphApp:
         self.ax.set_xticks(xticks)
         self.ax.set_xticklabels(xlabels, color="white", rotation=0, fontsize=10)
 
-        new_width = max(8, total_seq * (square_width + gap))
+        # Переопределяем формат отображения координат в панели инструментов
+        def format_coord(x, y):
+            idx = int(x // (square_width + gap))
+            if 0 <= idx < len(self.seq_info):
+                seq = self.seq_info[idx]["seq"]
+                return f"x={x:.2f}, y={y:.2f}, seq={seq}"
+            else:
+                return f"x={x:.2f}, y={y:.2f}"
+        self.ax.format_coord = format_coord
+
+        new_width = max(8, int(total_seq * (square_width + gap)))
         self.figure.set_size_inches(new_width, 4, forward=True)
         self.canvas.draw()
-        # git commit -m "feat: Динамическое изменение размера графика для показа всех элементов"
 
         self.update_summary_table()
 
@@ -356,10 +361,17 @@ class CSVGraphApp:
                 if self.check_vars["seq"].get():
                     tooltip_parts.append(f"Seq: {seq}")
                 if self.check_vars["timestamp"].get():
+                    # Для каждого события типа 1 добавляем префикс "timestamp:"
                     for event in events:
-                        tooltip_parts.append(event['timestamp'].strftime('%Y-%m-%d %H:%M:%S'))
+                        formatted_time = event['timestamp'].strftime('%Y-%m-%d %H:%M:%S')
+                        if event["type"] == 1:
+                            tooltip_parts.append("Timestamp: " + formatted_time)
+                        else:
+                            tooltip_parts.append(formatted_time)
                 if self.check_vars["events"].get():
-                    tooltip_parts.append("Events: " + ", ".join(str(event["type"]) for event in events))
+                    # Маппинг для вывода событий: -1 -> lost, 1 -> recieved, 2 -> resend
+                    mapping = {-1: "Lost", 1: "Received", 2: "Resend"}
+                    tooltip_parts.append("Events: " + ", ".join(mapping.get(event["type"], str(event["type"])) for event in events))
                 if self.check_vars["count"].get():
                     tooltip_parts.append("Count: " + ", ".join(str(event["count"]) for event in events))
                 tooltip_text = "\n".join(tooltip_parts)
@@ -367,7 +379,7 @@ class CSVGraphApp:
         except Exception as e:
             print(f"[ERROR] Ошибка при получении данных для tooltip: {e}")
             return "Ошибка данных"
-        # git commit -m "fix: Обработка ошибок в get_tooltip_text"
+        # git commit -m "fix: Обновлена функция get_tooltip_text для вывода timestamp и events по требованиям"
 
     def on_hover(self, event):
         """
