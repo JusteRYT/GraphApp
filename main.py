@@ -1,11 +1,13 @@
+import math
 import tkinter as tk
 from tkinter import filedialog, ttk
 import pandas as pd
 import matplotlib
 import matplotlib.pyplot as plt
 import time
+import ast
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg, NavigationToolbar2Tk
-from matplotlib.patches import Rectangle
+from matplotlib.patches import Rectangle, Circle
 
 # Используем TkAgg и темную тему
 matplotlib.use("TkAgg")
@@ -150,8 +152,8 @@ class CSVGraphApp:
 
         self.colors = {
             -1: "#FF0000",  # lost – красный
-            1: "#00FF00",   # received – зеленый
-            2: "#FFD700"    # resend – желтый
+            1: "#00FF00",  # received – зеленый
+            2: "#FFD700"  # resend – желтый
         }
         # git commit -m "refactor: Инициализация атрибутов в __init__ и переименование параметра"
 
@@ -163,13 +165,13 @@ class CSVGraphApp:
         """
         screen_width = self.root.winfo_screenwidth()
         screen_height = self.root.winfo_screenheight()
-        width = int(screen_width * 0.5)
-        height = int(screen_height * 0.5)
+        width = int(screen_width)
+        height = int(screen_height)
         max_width = 2560
         max_height = 1440
         width = min(width, max_width)
-        height = min(height, max_height)
-        x = int((screen_width - width) / 2)
+        height = int((height + max_height) / 2)
+        x = int((screen_width - width) / 5.2)
         y = int((screen_height - height) / 2)
         geometry_str = f"{width}x{height}+{x}+{y}"
         self.root.geometry(geometry_str)
@@ -198,7 +200,6 @@ class CSVGraphApp:
             side=tk.LEFT, padx=5)
         for var in self.check_vars.values():
             var.trace_add("write", lambda name, index, mode: self.update_visible_tooltip())
-        # git commit -m "feat: Добавлены чекбоксы для настройки tooltip"
 
     def update_visible_tooltip(self):
         """Если tooltip открыт, обновляем его текст с учётом настроек."""
@@ -206,6 +207,78 @@ class CSVGraphApp:
             tooltip_text = self.get_tooltip_text(self.last_patch)
             for widget in self.tooltip_window.winfo_children():
                 widget.config(text=tooltip_text)
+
+    @staticmethod
+    def parse_seq(row):
+        """
+        Парсит значение столбца 'seq'. Если row["type"] == 3, ожидается строка в формате "[9, 19, 29]"
+        и возвращается список чисел. Для остальных типов, если значение выглядит как список,
+        берётся первый элемент, иначе – пытается преобразовать значение к int.
+        Добавлены отладочные сообщения для отслеживания ошибок преобразования.
+        """
+        if pd.isna(row["seq"]):
+            print(f"[DEBUG] Отсутствует значение 'seq' для строки с timestamp {row.get('timestamp')}")
+            return []
+
+        seq_val = row["seq"]
+        # Если значение представлено строкой
+        if isinstance(seq_val, str):
+            seq_val = seq_val.strip()
+            # Если строка выглядит как список
+            if seq_val.startswith("[") and seq_val.endswith("]"):
+                try:
+                    parsed = ast.literal_eval(seq_val)
+                except Exception as e:
+                    print(f"[DEBUG] Ошибка при парсинге строки 'seq' {seq_val}: {e}")
+                    return []
+                if row["type"] != 3.0:
+                    # Для обычных событий берём первый элемент списка
+                    if parsed:
+                        first_elem = parsed[0]
+                        if pd.isna(first_elem) or (isinstance(first_elem, (int, float)) and (math.isinf(first_elem))):
+                            print(f"[DEBUG] Невалидное число {first_elem} в строке {seq_val}")
+                            return []
+                        try:
+                            return [int(first_elem)]
+                        except Exception as e:
+                            print(f"[DEBUG] Ошибка преобразования первого элемента {first_elem} в int: {e}")
+                            return []
+                    else:
+                        return []
+                else:
+                    # Для nack (type==3) возвращаем весь список
+                    return parsed
+            else:
+                try:
+                    val = int(seq_val)
+                    return [val]
+                except Exception as e:
+                    print(f"[DEBUG] Ошибка преобразования 'seq' '{seq_val}' в int: {e}")
+                    return []
+        # Если значение уже является списком
+        elif isinstance(seq_val, list):
+            if row["type"] != 3:
+                if seq_val:
+                    first_elem = seq_val[0]
+                    if pd.isna(first_elem) or (isinstance(first_elem, (int, float)) and math.isinf(first_elem)):
+                        print(f"[DEBUG] Невалидное число {first_elem} в списке {seq_val}")
+                        return []
+                    try:
+                        return [int(first_elem)]
+                    except Exception as e:
+                        print(f"[DEBUG] Ошибка преобразования первого элемента списка {seq_val} в int: {e}")
+                        return []
+                else:
+                    return []
+            else:
+                return seq_val
+        else:
+            try:
+                val = int(seq_val)
+                return [val]
+            except Exception as e:
+                print(f"[DEBUG] Ошибка преобразования 'seq' {seq_val} в int: {e}")
+                return []
 
     def load_csv(self):
         """
@@ -217,10 +290,13 @@ class CSVGraphApp:
         if not file_path:
             return
         try:
+            print(f"Начинаем парсить файл")
             df = pd.read_csv(file_path)
+            print(f"Файл прочитан{len(df)}")
+            df["seq_list"] = df.apply(CSVGraphApp.parse_seq, axis=1)
             if not {"timestamp", "seq", "type"}.issubset(df.columns):
                 raise ValueError("CSV не содержит столбцы: timestamp, seq, type")
-            df["type"] = df["type"].astype(int)
+            df["type"] = df["type"].astype(float)
             if "count" not in df.columns:
                 df["count"] = 1
             df["timestamp"] = pd.to_datetime(df["timestamp"], unit="s", errors="coerce")
@@ -239,22 +315,37 @@ class CSVGraphApp:
 
     def plot_graph(self):
         """
-         /**
-          * Строит state timeline:
-          * - Группирует данные по 'seq' и определяет итоговое состояние.
-          * - Отрисовывает квадраты с зазором по оси X и устанавливает xticks.
-          * - Размер фигуры обновляется динамически.
-          */
+         1) Собирает все уникальные seq (из всех строк, независимо от type).
+         2) Отрисовывает нормальные события (type != 3) на y=0.5.
+         3) Для nack (type == 3) рисует тонкие прямоугольники снизу, ближе к bar_patch:
+            - Если нет пересечения по seq, располагается на «нулевой» линии (base_y - 0.2).
+            - Если пересекается, сдвигается на линию ниже (line_spacing).
+            - Внутри прямоугольника рисуются точки по центру.
+         4) Рисует состояние фрейма (блоки по 10 seq).
+         5) Настраивает оси, масштаб и обновляет сводную таблицу.
         """
+        from matplotlib.patches import Rectangle, Circle
+
         if self.data is None or self.data.empty:
             return
 
+        # 1. Очистка предыдущего графика
         self.ax.clear()
         self.bar_patches.clear()
         self.seq_info.clear()
 
-        grouped = self.data.groupby("seq")
-        for seq, group in grouped:
+        # Собираем все seq из seq_list
+        all_seq = set()
+        for _, row in self.data.iterrows():
+            for s in row["seq_list"]:
+                all_seq.add(s)
+        sorted_seq = sorted(all_seq)
+        seq_to_index = {seq: i for i, seq in enumerate(sorted_seq)}
+
+        # 2. Нормальные события (type != 3)
+        normal_df = self.data[self.data["type"] != 3]
+        seq_info_dict = {}
+        for seq, group in normal_df.groupby(normal_df["seq_list"].apply(lambda lst: lst[0])):
             group = group.sort_values("timestamp")
             events = group.to_dict('records')
             types = group["type"].tolist()
@@ -266,56 +357,148 @@ class CSVGraphApp:
                 final_state = -1
             else:
                 final_state = -1
+            seq_info_dict[seq] = {"final_state": final_state, "events": events}
+        self.seq_info = seq_info_dict
 
-            # Сохраняем информацию, tooltip для final_state == 2 будет формироваться в get_tooltip_text
-            self.seq_info.append({
-                "seq": seq,
-                "final_state": final_state,
-                "events": events
-            })
-
-        self.seq_info.sort(key=lambda item: item["seq"])
-
+        # Отрисовываем прямоугольники для нормальных событий
         square_width = 0.8
         gap = 0.2
-        y_coord = 0.5
-        for i, info in enumerate(self.seq_info):
-            color = self.colors.get(info["final_state"], "#FFFFFF")
-            x_coord = i * (square_width + gap)
-            patch = self.ax.add_patch(Rectangle((x_coord, y_coord), square_width, 0.5, color=color))
+        base_y = 0.5
+
+        for seq, data in self.seq_info.items():
+            idx = seq_to_index.get(seq)
+            if idx is None:
+                continue
+            x_coord = idx * (square_width + gap)
+            color = self.colors.get(data["final_state"], "#FFFFFF")
+            patch = self.ax.add_patch(Rectangle((x_coord, base_y), square_width, 0.5, color=color))
             self.bar_patches.append(patch)
 
-        total_seq = len(self.seq_info)
-        self.ax.set_xlim(0, total_seq * (square_width + gap))
-        self.ax.set_ylim(0, 1)
+        # 3. Nack-события (type == 3)
+        #    Размещаем тонкие прямоугольники + точки, если пересекаются – идём на линию ниже
+        nack_df = self.data[self.data["type"] == 3]
+        rect_height = 0.07  # тонкий прямоугольник
+        line_spacing = 0.005  # расстояние между линиями
+        first_line_offset = 0.075  # насколько первая линия ниже base_y
+
+        # Структура «линий»: список списков занятых интервалов [(start_idx, end_idx), ...]
+        lines = []
+
+        def intervals_overlap(a1, b1, a2, b2):
+            return not (b1 < a2 or a1 > b2)
+
+        for _, row in nack_df.iterrows():
+            seq_list = row["seq_list"]
+            if not seq_list:
+                continue
+
+            min_seq = min(seq_list)
+            max_seq = max(seq_list)
+            min_idx = seq_to_index.get(min_seq)
+            max_idx = seq_to_index.get(max_seq)
+            if min_idx is None or max_idx is None:
+                continue
+
+            start_interval = min_idx
+            end_interval = max_idx
+
+            # Ищем линию, где нет пересечения
+            line_index = None
+            for i_line, intervals in enumerate(lines):
+                overlap_found = False
+                for (istart, iend) in intervals:
+                    if intervals_overlap(start_interval, end_interval, istart, iend):
+                        overlap_found = True
+                        break
+                if not overlap_found:
+                    line_index = i_line
+                    intervals.append((start_interval, end_interval))
+                    break
+
+            if line_index is None:
+                line_index = len(lines)
+                lines.append([(start_interval, end_interval)])
+
+            # Координаты прямоугольника
+            x_start = min_idx * (square_width + gap)
+            x_end = max_idx * (square_width + gap) + square_width
+            width_rect = x_end - x_start
+
+            # Первая линия: base_y - first_line_offset
+            # Каждая следующая: ещё ниже на (rect_height + line_spacing)
+            rect_y = base_y - first_line_offset - line_index * (rect_height + line_spacing)
+
+            # Рисуем прямоугольник (тонкий, белый)
+            self.ax.add_patch(
+                Rectangle((x_start, rect_y), width_rect, rect_height, color="cyan", alpha=0.7, zorder=2)
+            )
+
+            # Рисуем точки внутри
+            for s in seq_list:
+                s_idx = seq_to_index.get(s)
+                if s_idx is None:
+                    continue
+                s_x_center = s_idx * (square_width + gap) + square_width / 2
+                circle_y = rect_y + rect_height / 2
+                self.ax.scatter(s_x_center, circle_y, s=25, marker="o", color="red", zorder=3)
+
+        # 4. Состояние фрейма по блокам 10 seq
+        block_size = 10
+        sorted_seq_list = sorted_seq
+        for i in range(0, len(sorted_seq_list), block_size):
+            block = sorted_seq_list[i:i + block_size]
+            block_state = "GREEN"
+            for s in block:
+                if s in self.seq_info and self.seq_info[s]["final_state"] == -1:
+                    block_state = "RED"
+                    break
+            start_idx = i
+            block_width = len(block) * (square_width + gap)
+            x_start = start_idx * (square_width + gap)
+            self.ax.add_patch(
+                Rectangle((x_start, 1.1), block_width, 0.2, color=block_state.lower(), alpha=0.5, zorder=1))
+            self.ax.text(x_start + block_width / 2, 1.2, f"Frame: {block_state}", color="white",
+                         fontsize=10, ha="center", va="center", zorder=2)
+
+        # 5. Настраиваем оси
+        total_seq = len(sorted_seq)
+        total_width = total_seq * (square_width + gap)
+
+        line_count = len(lines)
+        if line_count > 0:
+            # самая последняя линия: line_count-1
+            last_line_y = base_y - first_line_offset - (line_count - 1) * (rect_height + line_spacing)
+            # небольшой запас снизу
+            y_min = last_line_y - 0.3
+        else:
+            y_min = 0
+
+        self.ax.set_xlim(0, total_width)
+        self.ax.set_ylim(y_min, 1.5)
         self.ax.get_yaxis().set_visible(False)
-        self.ax.spines["top"].set_visible(False)
-        self.ax.spines["left"].set_visible(False)
-        self.ax.spines["right"].set_visible(False)
+        for spine in ["top", "left", "right"]:
+            self.ax.spines[spine].set_visible(False)
 
-        xticks = []
-        xlabels = []
-        for i, info in enumerate(self.seq_info):
-            x_center = i * (square_width + gap) + square_width / 2
-            xticks.append(x_center)
-            xlabels.append(str(info["seq"]))
+        # xticks и xlabels
+        xticks = [i * (square_width + gap) + square_width / 2 for i in range(total_seq)]
+        xlabels = [str(seq) for seq in sorted_seq]
         self.ax.set_xticks(xticks)
-        self.ax.set_xticklabels(xlabels, color="white", rotation=0, fontsize=10)
+        self.ax.set_xticklabels(xlabels, color="white", fontsize=10)
 
-        # Переопределяем формат отображения координат в панели инструментов
         def format_coord(x_val, _y_val):
             i_index = int(x_val // (square_width + gap))
-            if 0 <= i_index < len(self.seq_info):
-                seq_val = self.seq_info[i_index]["seq"]
-                return f"seq={seq_val}"
+            if 0 <= i_index < len(sorted_seq_list):
+                return f"seq={sorted_seq_list[i_index]}"
             else:
-                return f""
+                return ""
+
         self.ax.format_coord = format_coord
 
-        new_width = max(8, int(total_seq * (square_width + gap)))
-        self.figure.set_size_inches(new_width, 4, forward=True)
+        width_inches = max(8, math.ceil(total_width))
+        self.figure.set_size_inches(width_inches, 4, forward=True)
         self.canvas.draw()
 
+        # 6. Обновляем сводную таблицу
         self.update_summary_table()
 
     def update_summary_table(self):
@@ -349,31 +532,70 @@ class CSVGraphApp:
           */
         """
         try:
-            index = self.bar_patches.index(patch)
-            info = self.seq_info[index]
-            seq = info["seq"]
+            # Находим seq, связанный с патчем (если он есть)
+            x_coord = patch.get_x()
+            square_width = 0.8
+            gap = 0.2
+            idx = int(x_coord / (square_width + gap))
+
+            # Получаем отсортированный список seq
+            all_seq = set()
+            for _, row in self.data.iterrows():
+                for s in row["seq_list"]:
+                    all_seq.add(s)
+            sorted_seq = sorted(all_seq)
+            if 0 <= idx < len(sorted_seq):
+                seq = sorted_seq[idx]
+            else:
+                return "Нет данных для tooltip"
+
+            # Ищем информацию о seq
+            info = self.seq_info.get(seq)  # Заменили доступ по индексу на поиск по ключу seq
+
+            if info is None:
+                return "Нет данных для tooltip"
+
             events = info["events"]
             final_state = info["final_state"]
+
+            tooltip_parts = []
+
             if final_state == 2:
                 tooltip_text = _format_final_state_2(seq, events)
-            else:
-                tooltip_parts = []
-                if self.check_vars["seq"].get():
-                    tooltip_parts.append(f"Seq: {seq}")
-                if self.check_vars["timestamp"].get():
-                    for event in events:
-                        formatted_time = event['timestamp'].strftime('%Y-%m-%d %H:%M:%S')
-                        # Для типов 1 и -1 добавляем префикс "Timestamp:"
-                        if event["type"] in (1, -1):
-                            tooltip_parts.append("Timestamp: " + formatted_time)
-                        else:
-                            tooltip_parts.append(formatted_time)
-                if self.check_vars["events"].get():
-                    mapping = {-1: "Lost", 1: "Received", 2: "Resend"}
-                    tooltip_parts.append("Events: " + ", ".join(mapping.get(event["type"], str(event["type"])) for event in events))
-                if self.check_vars["count"].get():
-                    tooltip_parts.append("Count: " + ", ".join(str(event["count"]) for event in events))
-                tooltip_text = "\n".join(tooltip_parts)
+                return tooltip_text  # Возвращаем текст для final_state == 2 сразу
+
+            if self.check_vars["seq"].get():
+                tooltip_parts.append(f"Seq: {seq}")
+
+            if self.check_vars["timestamp"].get():
+                timestamps = []
+                for event in events:
+                    formatted_time = event['timestamp'].strftime('%Y-%m-%d %H:%M:%S')
+                    # Для типов 1 и -1 добавляем префикс "Timestamp:"
+                    if event["type"] in (1.0, -1.0):
+                        timestamps.append("Timestamp: " + formatted_time)
+                    else:
+                        timestamps.append(formatted_time)
+                tooltip_parts.append("\n".join(timestamps))  # Выводим все timestamp одной строкой
+
+            if self.check_vars["events"].get():
+                mapping = {-1.0: "Lost", 1.0: "Received", 2.0: "Resend"}
+                event_types = []
+                for event in events:
+                    event_type = event["type"]
+                    if pd.isna(event_type):  # Проверяем на NaN
+                        continue  # Пропускаем событие с NaN type
+                    else:
+                        event_types.append(mapping.get(event_type, str(event_type)))
+                tooltip_parts.append("Events: " + ", ".join(event_types))
+
+            if self.check_vars["count"].get():
+                counts = []
+                for event in events:
+                    counts.append(str(event["count"]))
+                tooltip_parts.append("Count: " + ", ".join(counts))
+
+            tooltip_text = "\n".join(tooltip_parts)
             return tooltip_text
         except Exception as e:
             print(f"[ERROR] Ошибка при получении данных для tooltip: {e}")
