@@ -145,7 +145,11 @@ class CSVGraphApp:
         self.update_interval = 0.1  # 100 мс
         self.last_update_time = 0
         self.bar_patches = []  # список квадратов
+        self.nack_rects = []
+        self.frame_rects = []
         self.seq_info: dict = {}  # агрегированная информация по seq
+        self.generated_color = 'lime'
+        self.ungenerated_color = 'orangered'
 
         self.data = None  # данные CSV
         self.canvas.mpl_connect("motion_notify_event", self.on_hover)
@@ -429,10 +433,11 @@ class CSVGraphApp:
             # Каждая следующая: ещё ниже на (rect_height + line_spacing)
             rect_y = base_y - first_line_offset - line_index * (rect_height + line_spacing)
 
+            nack_rect = Rectangle((x_start, rect_y), width_rect, rect_height, color="cyan", alpha=0.7, zorder=2)
+            nack_rect.tooltip = f"NACK: {seq_list} "
             # Рисуем прямоугольник (тонкий, белый)
-            self.ax.add_patch(
-                Rectangle((x_start, rect_y), width_rect, rect_height, color="cyan", alpha=0.7, zorder=2)
-            )
+            self.ax.add_patch(nack_rect)
+            self.nack_rects.append(nack_rect)
 
             # Рисуем точки внутри
             for s in seq_list:
@@ -448,16 +453,20 @@ class CSVGraphApp:
         sorted_seq_list = sorted_seq
         for i in range(0, len(sorted_seq_list), block_size):
             block = sorted_seq_list[i:i + block_size]
-            block_state = "GREEN"
+            block_state = "Generated"
+            block_color = self.generated_color
             for s in block:
                 if s in self.seq_info and self.seq_info[s]["final_state"] == -1:
-                    block_state = "RED"
+                    block_state = "UnGenerated"
+                    block_color = self.ungenerated_color
                     break
             start_idx = i
             block_width = len(block) * (square_width + gap)
             x_start = start_idx * (square_width + gap)
-            self.ax.add_patch(
-                Rectangle((x_start, 1.1), block_width, 0.2, color=block_state.lower(), alpha=0.5, zorder=1))
+            frame_rect = Rectangle((x_start, 1.1), block_width, 0.2, color=block_color, alpha=0.5, zorder=1)
+            frame_rect.tooltip = f"Frame: {block_state} ({block[0]} - {block[-1]})"
+            self.ax.add_patch(frame_rect)
+            self.frame_rects.append(frame_rect)
             self.ax.text(x_start + block_width / 2, 1.2, f"Frame: {block_state}", color="white",
                          fontsize=10, ha="center", va="center", zorder=2)
 
@@ -603,20 +612,17 @@ class CSVGraphApp:
             return "Ошибка данных"
 
     def on_hover(self, event):
-        """
-         /**
-          * При наведении на квадрат отображается tooltip и выделяется квадрат.
-          * Если курсор не над patch, tooltip удаляется.
-          */
-        """
         current_time = time.time()
         if current_time - self.last_update_time < self.update_interval:
             return
         self.last_update_time = current_time
 
+        # Объединяем все патчи, для которых хотим показывать tooltip
+        all_patches = self.bar_patches + getattr(self, "nack_rects", []) + getattr(self, "frame_rects", [])
         current_patch = None
-        for patch in self.bar_patches:
-            if patch.contains(event)[0]:
+        for patch in all_patches:
+            contains, _ = patch.contains(event)
+            if contains:
                 current_patch = patch
                 break
 
@@ -636,10 +642,18 @@ class CSVGraphApp:
                 self.last_patch.set_linewidth(0)
                 self.last_patch.set_edgecolor(None)
             self.last_patch = current_patch
-            current_patch.set_linewidth(3)
-            current_patch.set_edgecolor("white")
+            # Выделяем только нормальные события (bar_patches)
+            if current_patch in self.bar_patches:
+                current_patch.set_linewidth(3)
+                current_patch.set_edgecolor("white")
             self.canvas.draw_idle()
-            tooltip_text = self.get_tooltip_text(current_patch)
+
+            # Если у патча уже задан tooltip (для nack и frame), используем его,
+            # иначе вызываем get_tooltip_text для обычного bar_patch
+            if hasattr(current_patch, "tooltip"):
+                tooltip_text = current_patch.tooltip
+            else:
+                tooltip_text = self.get_tooltip_text(current_patch)
             self.show_tooltip(tooltip_text)
 
     def show_tooltip(self, text):
