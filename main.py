@@ -1,4 +1,5 @@
 import math
+import os
 import tkinter as tk
 from tkinter import filedialog, ttk
 import pandas as pd
@@ -7,7 +8,6 @@ import matplotlib.pyplot as plt
 import time
 import ast
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg, NavigationToolbar2Tk
-from matplotlib.patches import Rectangle, Circle
 
 # Используем TkAgg и темную тему
 matplotlib.use("TkAgg")
@@ -145,7 +145,7 @@ class CSVGraphApp:
         self.update_interval = 0.1  # 100 мс
         self.last_update_time = 0
         self.bar_patches = []  # список квадратов
-        self.seq_info = []  # агрегированная информация по seq
+        self.seq_info: dict = {}  # агрегированная информация по seq
 
         self.data = None  # данные CSV
         self.canvas.mpl_connect("motion_notify_event", self.on_hover)
@@ -155,7 +155,6 @@ class CSVGraphApp:
             1: "#00FF00",  # received – зеленый
             2: "#FFD700"  # resend – желтый
         }
-        # git commit -m "refactor: Инициализация атрибутов в __init__ и переименование параметра"
 
     def center_half_screen(self):
         """
@@ -290,9 +289,7 @@ class CSVGraphApp:
         if not file_path:
             return
         try:
-            print(f"Начинаем парсить файл")
             df = pd.read_csv(file_path)
-            print(f"Файл прочитан{len(df)}")
             df["seq_list"] = df.apply(CSVGraphApp.parse_seq, axis=1)
             if not {"timestamp", "seq", "type"}.issubset(df.columns):
                 raise ValueError("CSV не содержит столбцы: timestamp, seq, type")
@@ -302,13 +299,17 @@ class CSVGraphApp:
             df["timestamp"] = pd.to_datetime(df["timestamp"], unit="s", errors="coerce")
             df = df.dropna(subset=["timestamp"])
             self.data = df
-            self.file_label.config(text=f"Выбран файл: {file_path.split('/')[-1]}")
+            # Проверяем, что файл file_path - строка
+            if isinstance(file_path, str):
+                filename = os.path.basename(file_path)
+                self.file_label.config(text=f"Выбран файл: {filename}")
+            else:
+                self.file_label.config(text="Ошибка: Некорректный путь к файлу")
             self.plot_button.config(state=tk.NORMAL)
             # Отображаем основной контейнер, если он ещё не показан
             if not self.main_frame.winfo_ismapped():
                 self.main_frame.pack(fill=tk.BOTH, expand=True)
             self.plot_graph()
-            # git commit -m "feat: Загрузка и валидация CSV"
         except Exception as e:
             self.file_label.config(text=f"Ошибка: {e}")
             self.plot_button.config(state=tk.DISABLED)
@@ -324,7 +325,7 @@ class CSVGraphApp:
          4) Рисует состояние фрейма (блоки по 10 seq).
          5) Настраивает оси, масштаб и обновляет сводную таблицу.
         """
-        from matplotlib.patches import Rectangle, Circle
+        from matplotlib.patches import Rectangle
 
         if self.data is None or self.data.empty:
             return
@@ -483,7 +484,7 @@ class CSVGraphApp:
         xticks = [i * (square_width + gap) + square_width / 2 for i in range(total_seq)]
         xlabels = [str(seq) for seq in sorted_seq]
         self.ax.set_xticks(xticks)
-        self.ax.set_xticklabels(xlabels, color="white", fontsize=10)
+        self.ax.set_xticklabels(xlabels, color="white", fontsize=12, rotation=90)
 
         def format_coord(x_val, _y_val):
             i_index = int(x_val // (square_width + gap))
@@ -508,9 +509,9 @@ class CSVGraphApp:
           */
         """
         total_seq = len(self.seq_info)
-        total_received = sum(1 for info in self.seq_info if info["final_state"] in [1, 2])
-        total_lost = sum(1 for info in self.seq_info if info["final_state"] == -1)
-        recovery_count = sum(1 for info in self.seq_info if info["final_state"] == 2)
+        total_received = sum(1 for info in self.seq_info.values() if info["final_state"] in [1, 2])
+        total_lost = sum(1 for info in self.seq_info.values() if info["final_state"] == -1)
+        recovery_count = sum(1 for info in self.seq_info.values() if info["final_state"] == 2)
         loss_ratio = (total_lost / total_seq * 100) if total_seq > 0 else 0
         denominator = (total_lost + recovery_count)
         recovery_ratio = (recovery_count / denominator * 100) if denominator > 0 else 0
