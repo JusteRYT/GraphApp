@@ -8,7 +8,6 @@ import matplotlib.pyplot as plt
 import time
 import ast
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg, NavigationToolbar2Tk
-from matplotlib.collections import PatchCollection
 
 # Используем TkAgg и темную тему
 matplotlib.use("TkAgg")
@@ -139,26 +138,22 @@ class CSVGraphApp:
         self.toolbar.pack(side=tk.TOP, fill=tk.X)
 
         # Выделение при hover
-        self.selected_patch = None
-        self._facecolors = {}
-
+        self._facecolors = None
         self.tooltip_window = None
+        self.tooltip_label = None
         self.last_patch = None
-        self.update_interval = 0.1  # 100 мс
+        self.update_interval = 0  # 100 мс
         self.last_update_time = 0
-        self.bar_patches = []  # список квадратов
         self.norm_tooltips = []
         self.norm_collection = []
         self.nack_tooltips = []
         self.nack_collection = []
-        self.nack_box_tooltips = []
         self.frame_collection = []
         self.frame_tooltips = []
-        self.nack_rects = []
-        self.frame_rects = []
         self.seq_info: dict = {}  # агрегированная информация по seq
         self.generated_color = 'lime'
         self.ungenerated_color = 'orangered'
+        self.last_event = None
 
         self.data = None  # данные CSV
         self.canvas.mpl_connect("motion_notify_event", self.on_hover)
@@ -218,97 +213,97 @@ class CSVGraphApp:
             var.trace_add("write", lambda name, index, mode: self.update_visible_tooltip())
 
     def update_visible_tooltip(self):
-        """Если tooltip открыт, обновляем его текст с учётом настроек."""
-        if not self.tooltip_window or not self.last_patch:
+        """
+        Если окно tooltip открыто, обновляет его текст с учётом последних настроек.
+        Использует последнее сохранённое событие (self.last_event) и функцию _find_tooltip.
+        """
+        if not self.tooltip_window or not hasattr(self, "last_event"):
             return
 
-        tooltip_text = "Нет данных"
-
-        # Проверяем, в какой коллекции находится patch
-        if self.norm_collection and self.last_patch in self.norm_collection.get_paths():
-            idx = self.norm_collection.get_paths().index(self.last_patch)
-            tooltip_text = self.norm_tooltips[idx] if idx < len(self.norm_tooltips) else "Нет данных"
-
-        elif self.nack_collection and self.last_patch in self.nack_collection.get_paths():
-            idx = self.nack_collection.get_paths().index(self.last_patch)
-            tooltip_text = self.nack_tooltips[idx] if idx < len(self.nack_tooltips) else "Нет данных"
-
-        elif self.frame_collection and self.last_patch in self.frame_collection.get_paths():
-            idx = self.frame_collection.get_paths().index(self.last_patch)
-            tooltip_text = self.frame_tooltips[idx] if idx < len(self.frame_tooltips) else "Нет данных"
-
-        # Обновляем текст tooltip'а
-        for widget in self.tooltip_window.winfo_children():
-            widget.config(text=tooltip_text)
+        _, tooltip_text, _ = self._find_tooltip(self.last_event)
+        if tooltip_text:
+            for widget in self.tooltip_window.winfo_children():
+                widget.config(text=tooltip_text)
+        else:
+            self.remove_tooltip()
 
     @staticmethod
     def parse_seq(row):
         """
-        Парсит значение столбца 'seq'. Если row["type"] == 3, ожидается строка в формате "[9, 19, 29]"
-        и возвращается список чисел. Для остальных типов, если значение выглядит как список,
-        берётся первый элемент, иначе – пытается преобразовать значение к int.
-        Добавлены отладочные сообщения для отслеживания ошибок преобразования.
+        Парсит значение столбца 'seq'. Если row["type"] == 3, данные могут быть:
+          - строкой в формате "[9, 19, 29]" или "24691, 24692" – возвращается список чисел;
+          - либо просто числом (например, "2912" или 2912) – возвращается список с этим числом.
+        Для остальных типов, если значение выглядит как список, берётся первый элемент,
+        иначе – пытается преобразовать значение к int.
         """
         if pd.isna(row["seq"]):
             print(f"[DEBUG] Отсутствует значение 'seq' для строки с timestamp {row.get('timestamp')}")
             return []
 
         seq_val = row["seq"]
+        event_type = row["type"]
+
         # Если значение представлено строкой
         if isinstance(seq_val, str):
             seq_val = seq_val.strip()
-            # Если строка выглядит как список
+            # Если строка выглядит как список: начинается с "[" и заканчивается на "]"
             if seq_val.startswith("[") and seq_val.endswith("]"):
                 try:
                     parsed = ast.literal_eval(seq_val)
                 except Exception as e:
                     print(f"[DEBUG] Ошибка при парсинге строки 'seq' {seq_val}: {e}")
                     return []
-                if row["type"] != 3.0:
-                    # Для обычных событий берём первый элемент списка
+                if event_type == 3.0:
+                    try:
+                        return [int(x) for x in parsed]
+                    except Exception as e:
+                        print(f"[DEBUG] Ошибка преобразования элементов списка {parsed} в int: {e}")
+                        return []
+                else:
                     if parsed:
-                        first_elem = parsed[0]
-                        if pd.isna(first_elem) or (isinstance(first_elem, (int, float)) and (math.isinf(first_elem))):
-                            print(f"[DEBUG] Невалидное число {first_elem} в строке {seq_val}")
-                            return []
                         try:
-                            return [int(first_elem)]
+                            return [int(parsed[0])]
                         except Exception as e:
-                            print(f"[DEBUG] Ошибка преобразования первого элемента {first_elem} в int: {e}")
+                            print(f"[DEBUG] Ошибка преобразования первого элемента {parsed[0]} в int: {e}")
                             return []
                     else:
                         return []
-                else:
-                    # Для nack (type==3) возвращаем весь список
-                    return parsed
+            # Если строка содержит запятую, обрабатываем как разделённые числа
+            elif "," in seq_val:
+                try:
+                    parts = [part.strip() for part in seq_val.split(",")]
+                    numbers = [int(part) for part in parts if part]
+                    return numbers if event_type == 3.0 else numbers[:1]
+                except Exception as e:
+                    print(f"[DEBUG] Ошибка преобразования строки 'seq' '{seq_val}' с запятыми: {e}")
+                    return []
             else:
                 try:
-                    val = int(seq_val)
-                    return [val]
+                    return [int(seq_val)]
                 except Exception as e:
                     print(f"[DEBUG] Ошибка преобразования 'seq' '{seq_val}' в int: {e}")
                     return []
+
         # Если значение уже является списком
         elif isinstance(seq_val, list):
-            if row["type"] != 3:
+            if event_type == 3:
+                try:
+                    return [int(x) for x in seq_val]
+                except Exception as e:
+                    print(f"[DEBUG] Ошибка преобразования элементов списка {seq_val} в int: {e}")
+                    return []
+            else:
                 if seq_val:
-                    first_elem = seq_val[0]
-                    if pd.isna(first_elem) or (isinstance(first_elem, (int, float)) and math.isinf(first_elem)):
-                        print(f"[DEBUG] Невалидное число {first_elem} в списке {seq_val}")
-                        return []
                     try:
-                        return [int(first_elem)]
+                        return [int(seq_val[0])]
                     except Exception as e:
                         print(f"[DEBUG] Ошибка преобразования первого элемента списка {seq_val} в int: {e}")
                         return []
                 else:
                     return []
-            else:
-                return seq_val
         else:
             try:
-                val = int(seq_val)
-                return [val]
+                return [int(seq_val)]
             except Exception as e:
                 print(f"[DEBUG] Ошибка преобразования 'seq' {seq_val} в int: {e}")
                 return []
@@ -330,7 +325,7 @@ class CSVGraphApp:
             df["type"] = df["type"].astype(float)
             if "count" not in df.columns:
                 df["count"] = 1
-            df["timestamp"] = pd.to_datetime(df["timestamp"], unit="s", errors="coerce")
+            df["timestamp"] = pd.to_datetime(df["timestamp"], unit="ms", errors="coerce")
             df = df.dropna(subset=["timestamp"])
             self.data = df
             # Проверяем, что файл file_path - строка
@@ -383,7 +378,6 @@ class CSVGraphApp:
 
         # 2. Нормальные события (type != 3)
         normal_df = self.data[self.data["type"] != 3]
-        seq_info_dict = {}
         for seq in sorted_seq:
             # Выбираем все строки из normal_df, где seq содержится в seq_list
             group = normal_df[normal_df["seq_list"].apply(lambda lst: seq in lst)]
@@ -417,7 +411,6 @@ class CSVGraphApp:
         # 3. Nack-события (type == 3)
         # Здесь мы будем собирать nack-боксы в список и точки в отдельные массивы.
         nack_boxes = []
-        self.nack_box_tooltips = []
         nack_points_x = []
         nack_points_y = []
 
@@ -460,7 +453,7 @@ class CSVGraphApp:
             box = Rectangle((x_start, rect_y), width_rect, rect_height)
             box.tooltip = f"NACK: {seq_list}"
             nack_boxes.append(box)
-            self.nack_box_tooltips.append(box.tooltip)
+            self.nack_tooltips.append(box.tooltip)
             # Для каждой seq из seq_list, точки располагаются по центру соответствующего столбца
             for s in seq_list:
                 idx = seq_to_index.get(s)
@@ -484,6 +477,7 @@ class CSVGraphApp:
         # 4. Состояние фрейма по блокам 10 seq
         block_size = 10
         frame_boxes = []
+        frame_colors = []  # Список цветов для PatchCollection
         self.frame_tooltips = []
         for i in range(0, len(sorted_seq), block_size):
             block = sorted_seq[i:i + block_size]
@@ -497,20 +491,16 @@ class CSVGraphApp:
             start_idx = i
             block_width = len(block) * (self.square_width + self.gap)
             x_start = start_idx * (self.square_width + self.gap)
-            box = Rectangle((x_start, 1.1), block_width, 0.2, color=block_color, alpha=0.5, zorder=1)
-            box.tooltip = f"Frame: {block_state} ({block[0]} - {block[-1]})"
-            frame_boxes.append(box)
-            self.frame_tooltips.append(box.tooltip)
+            rect = matplotlib.patches.Rectangle((x_start, 1.1), block_width, 0.2)
+            frame_boxes.append(rect)
+            frame_colors.append(block_color)  # Добавляем цвет в список
+            self.frame_tooltips.append(f"Frame: {block_state} ({block[0]} - {block[-1]})")
             self.ax.text(x_start + block_width / 2, 1.2, f"Frame: {block_state}", color="white",
                          fontsize=10, ha="center", va="center", zorder=2)
 
         if frame_boxes:
-            self.frame_collection = PatchCollection(frame_boxes,
-                                                    facecolors=[(
-                                                                    self.generated_color if "Generated" in t else self.ungenerated_color)
-                                                                for t in
-                                                                self.frame_tooltips], alpha=0.5, edgecolor="none",
-                                                    picker=True)
+            self.frame_collection = PatchCollection(frame_boxes, facecolors=frame_colors, alpha=0.5,
+                                                    edgecolor="none", picker=True)
             self.ax.add_collection(self.frame_collection)
         else:
             self.frame_collection = None
@@ -622,75 +612,113 @@ class CSVGraphApp:
         return "\n".join(tooltip_parts)
 
     def on_hover(self, event):
-        current_time = time.time()
-        if current_time - self.last_update_time < self.update_interval:
-            return
-        self.last_update_time = current_time
+        """
+        Обрабатывает наведение курсора на объекты графика.
+        Если курсор над объектом (из norm, nack или frame коллекции),
+        выделяет его (изменяя контур) и показывает соответствующий tooltip.
+        При отсутствии объекта сбрасывает tooltip и восстанавливает исходные настройки.
+        """
 
-        # Объединяем все патчи, для которых хотим показывать tooltip
-        all_patches = self.bar_patches + getattr(self, "nack_rects", []) + getattr(self, "frame_rects", [])
-        current_patch = None
-        for patch in all_patches:
-            contains, _ = patch.contains(event)
-            if contains:
-                current_patch = patch
-                break
+        self.last_event = event  # Сохраняем событие для update_visible_tooltip
 
-        if current_patch is None:
-            if self.tooltip_window:
-                self.tooltip_window.destroy()
-                self.tooltip_window = None
-            if self.last_patch:
-                self.last_patch.set_linewidth(0)
-                self.last_patch.set_edgecolor(None)
-                self.last_patch = None
-            self.canvas.draw_idle()
-            return
+        # Убедимся, что внутренний словарь _facecolors инициализирован
+        if self._facecolors is None:
+            self._facecolors = {}
 
-        if current_patch != self.last_patch:
-            if self.last_patch is not None:
-                self.last_patch.set_linewidth(0)
-                self.last_patch.set_edgecolor(None)
-            self.last_patch = current_patch
-            # Выделяем только нормальные события (bar_patches)
-            if current_patch in self.bar_patches:
-                current_patch.set_linewidth(3)
-                current_patch.set_edgecolor("white")
-            self.canvas.draw_idle()
+        # Пытаемся найти tooltip для события во всех коллекциях
+        highlight_index, tooltip_text, current_coll = self._find_tooltip(event)
 
-            # Если у патча уже задан tooltip (для nack и frame), используем его,
-            # иначе вызываем get_tooltip_text для обычного bar_patch
-            if hasattr(current_patch, "tooltip"):
-                tooltip_text = current_patch.tooltip
-            else:
-                tooltip_text = self.get_tooltip_text(current_patch)
+        if tooltip_text is not None and current_coll is not None:
+            # Если объект найден, выделяем его, изменяя edgecolors и linewidths
+            try:
+                if current_coll not in self._facecolors:
+                    # Сохраняем исходные настройки для этой коллекции
+                    orig_fc = current_coll.get_edgecolors().copy() if current_coll.get_edgecolors().size else None
+                    orig_lw = current_coll.get_linewidths().copy() if current_coll.get_linewidths().size else None
+                    self._facecolors[current_coll] = (orig_fc, orig_lw)
+                new_edgecolors = current_coll.get_edgecolors().copy()
+                new_linewidths = current_coll.get_linewidths().copy()
+                # Убедимся, что new_edgecolors и new_linewidths имеют нужную длину
+                if new_edgecolors.size > highlight_index:
+                    new_edgecolors[highlight_index] = (1, 1, 1, 1)  # Белый контур
+                if new_linewidths.size > highlight_index:
+                    new_linewidths[highlight_index] = 3
+                current_coll.set_edgecolors(new_edgecolors)
+                current_coll.set_linewidths(new_linewidths)
+            except Exception as e:
+                print(f"[ERROR] Ошибка при выделении объекта: {e}")
             self.show_tooltip(tooltip_text)
+        else:
+            self.remove_tooltip()
+            # Сброс: восстанавливаем исходные настройки для всех коллекций
+            if self._facecolors is None:
+                self._facecolors = {}
+            for coll, (orig_fc, orig_lw) in self._facecolors.items():
+                try:
+                    if orig_fc is not None:
+                        coll.set_edgecolors(orig_fc)
+                    if orig_lw is not None:
+                        coll.set_linewidths(orig_lw)
+                except Exception as e:
+                    print(f"[ERROR] Ошибка при сбросе выделения: {e}")
+            self._facecolors.clear()
+
+        self.canvas.draw_idle()
+
+    def _find_tooltip(self, event):
+        """
+        Вспомогательный метод, который по событию (event) проверяет все три коллекции:
+        нормальные объекты, nack‑боксы и frame‑боксы.
+        Возвращает кортеж (index, tooltip_text, collection), если найден подходящий элемент,
+        иначе (None, None, None).
+        """
+        # Список коллекций вместе с соответствующими массивами tooltip
+        collections = [
+            (self.norm_collection, self.norm_tooltips),
+            (self.nack_collection, self.nack_tooltips),
+            (self.frame_collection, self.frame_tooltips)
+        ]
+        for collection, tooltips in collections:
+            if collection is not None:
+                contains, info = collection.contains(event)
+                if contains and "ind" in info and len(info["ind"]) > 0:
+                    idx = info["ind"][0]
+                    if idx < len(tooltips):
+                        return idx, tooltips[idx], collection
+        return None, None, None
+
 
     def show_tooltip(self, text):
         """
-         /**
-          * Отображает tooltip рядом с курсором.
-          */
+        Отображает tooltip рядом с курсором.
+        Если окно tooltip уже существует, то оно лишь показывается (deiconify) и обновляется его положение и текст.
         """
         x_root, y_root = self.root.winfo_pointerxy()
         if self.tooltip_window:
-            self.tooltip_window.destroy()
-        self.tooltip_window = tk.Toplevel(self.root)
-        self.tooltip_window.wm_overrideredirect(True)
-        self.tooltip_window.wm_geometry(f"+{x_root + 10}+{y_root + 10}")
-        label = tk.Label(self.tooltip_window, text=text, font=self.font, bg="#333333", fg="white", relief=tk.SOLID)
-        label.pack(padx=5, pady=5)
+            # Если окно уже создано, просто обновляем его положение и текст, и показываем его
+            self.tooltip_window.wm_geometry(f"+{x_root + 10}+{y_root + 10}")
+            self.tooltip_window.deiconify()
+            if hasattr(self, "tooltip_label") and self.tooltip_label:
+                self.tooltip_label.config(text=text)
+            else:
+                self.tooltip_label = tk.Label(self.tooltip_window, text=text, font=self.font,
+                                              bg="#333333", fg="white", relief=tk.SOLID)
+                self.tooltip_label.pack(padx=5, pady=5)
+        else:
+            self.tooltip_window = tk.Toplevel(self.root)
+            self.tooltip_window.wm_overrideredirect(True)
+            self.tooltip_window.wm_geometry(f"+{x_root + 10}+{y_root + 10}")
+            self.tooltip_label = tk.Label(self.tooltip_window, text=text, font=self.font,
+                                          bg="#333333", fg="white", relief=tk.SOLID)
+            self.tooltip_label.pack(padx=5, pady=5)
 
     def remove_tooltip(self):
         """
-         /**
-          * Удаляет tooltip, если он отображается.
-          */
+        Вместо уничтожения, скрываем окно tooltip (withdraw),
+        чтобы потом можно было быстро обновлять его содержимое.
         """
         if self.tooltip_window:
-            self.tooltip_window.destroy()
-            self.tooltip_window = None
-            self.last_patch = None
+            self.tooltip_window.withdraw()
 
 
 if __name__ == "__main__":
