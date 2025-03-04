@@ -1,13 +1,16 @@
-import math
+import datetime
 import os
 import tkinter as tk
+from tzlocal import get_localzone
 from tkinter import filedialog, ttk
 import pandas as pd
 import matplotlib
 import matplotlib.pyplot as plt
-import time
 import ast
+
+import pytz
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg, NavigationToolbar2Tk
+from matplotlib.collections import PatchCollection
 
 # Используем TkAgg и темную тему
 matplotlib.use("TkAgg")
@@ -16,13 +19,13 @@ plt.style.use('dark_background')
 
 def _format_final_state_2(seq, events):
     """
-     /**
-      * Форматирует tooltip для final_state == 2.
-      * Находит первый event с type=2 и последний event с type=-1, предшествующий ему.
-      * @param seq Значение seq.
-      * @param events Список событий.
-      * @return Отформатированный текст tooltip.
-      */
+    /**
+     * Форматирует tooltip для final_state == 2.
+     * Находит первый event с type=2 и последний event с type=-1, предшествующий ему.
+     * @param seq Значение seq.
+     * @param events Список событий.
+     * @return Отформатированный текст tooltip.
+     */
     """
     resend_event = None
     lost_event = None
@@ -32,40 +35,47 @@ def _format_final_state_2(seq, events):
             break
         elif event["type"] == -1:
             lost_event = event
+
+    def format_timestamp(event):
+        """Форматирует timestamp с миллисекундами."""
+        formatted_time = event['timestamp'].strftime('%Y-%m-%d %H:%M:%S')
+        milliseconds = int(event['timestamp'].microsecond / 1000)
+        return f"{formatted_time}:{milliseconds:03d}"
+
     if lost_event is not None and resend_event is not None:
         return (f"Seq: {seq}\n"
-                f"Lost: {lost_event['timestamp'].strftime('%Y-%m-%d %H:%M:%S')}\n"
-                f"Recovered: {resend_event['timestamp'].strftime('%Y-%m-%d %H:%M:%S')}")
+                f"Lost: {format_timestamp(lost_event)}\n"
+                f"Recovered: {format_timestamp(resend_event)}")
     elif resend_event is not None:
-        return f"Seq: {seq}\nResend at: {resend_event['timestamp'].strftime('%Y-%m-%d %H:%M:%S')}"
+        return f"Seq: {seq}\nResend at: {format_timestamp(resend_event)}"
     else:
         return f"Seq: {seq}"
+
+def get_system_timezone():
+    """
+    Пытается определить часовой пояс системы, используя /etc/localtime.
+    """
+    try:
+        localtime_path = os.readlink("/etc/localtime")
+        # Ожидаем, что путь будет иметь вид /usr/share/zoneinfo/<Area>/<Location>
+        parts = localtime_path.split("/")
+        if len(parts) > 4 and parts[1] == "usr" and parts[2] == "share" and parts[3] == "zoneinfo":
+            return "/".join(parts[4:])  # Area/Location
+    except OSError:
+        pass  # Файл /etc/localtime не является символической ссылкой
+
+    return None  # Не удалось определить часовой пояс
 
 
 class CSVGraphApp:
     """
-     /**
-      * Класс CSVGraphApp для отображения state timeline из CSV.
-      * По оси X располагаются квадраты, каждый из которых соответствует одному seq.
-      * Цвет квадрата определяется итоговым состоянием:
-      *   - type = -1 (lost) – красный,
-      *   - type = 1 (received) – зеленый,
-      *   - type = 2 (resend) – желтый.
-      *
-      * Логика определения итогового состояния:
-      *   Если в группе для seq присутствует хотя бы один event с type=2, итоговый статус = 2.
-      *   Иначе, если есть event с type=1, итоговый статус = 1.
-      *   Иначе – итоговый статус = -1.
-      *
-      * Для final_state == 2 tooltip формируется особым образом:
-      *   Находится первый event с type=2 и последний event с type=-1, предшествующий ему.
-      *   В tooltip выводится: время потери и время восстановления.
-      *
-      * Сводная таблица (в левом нижнем углу) подсчитывает:
-      *   Total Received, Total Lost, Loss Ratio, Recovery Ratio.
-      *
-      * При запуске программы основной контейнер с графиком не отображается до загрузки CSV.
-      */
+    CSVGraphApp – отображает state timeline из CSV.
+    Для каждого seq создаётся патч, цвет которого определяется итоговым состоянием:
+      - type = -1 → красный,
+      - type = 1  → зеленый,
+      - type = 2  → желтый.
+    Tooltip для final_state == 2 формируется особым образом.
+    Дополнительно реализован lazy rendering с элементами управления для перемещения по графику.
     """
 
     def __init__(self, master):
@@ -102,13 +112,6 @@ class CSVGraphApp:
         )
         self.select_button.pack(side=tk.LEFT, padx=5)
 
-        self.plot_button = tk.Button(
-            self.control_frame, text="Построить график", command=self.plot_graph,
-            state=tk.DISABLED, font=self.button_font, bg="#555555",
-            fg="white", relief=tk.FLAT
-        )
-        self.plot_button.pack(side=tk.LEFT, padx=5)
-
         self.file_label = tk.Label(
             self.control_frame, text="Файл не выбран", font=self.font, bg="#2E2E2E", fg="white"
         )
@@ -125,9 +128,23 @@ class CSVGraphApp:
         self.graph_frame = tk.Frame(self.main_frame, bg="#2E2E2E")
         self.graph_frame.pack(side=tk.TOP, fill=tk.BOTH, expand=True, padx=10, pady=10)
 
+        # Панель слайдера и стрелок для навигации по графику
+        self.nav_frame = tk.Frame(self.root, bg="#2E2E2E")
+        self.nav_frame.pack(fill=tk.BOTH, padx=10, pady=5)
+        self.prev_button = tk.Button(self.nav_frame, text="◀", command=self.move_left,
+                                     font=self.button_font, bg="#555555", fg="white", relief=tk.FLAT)
+        self.prev_button.pack(side=tk.LEFT, padx=5)
+        self.next_button = tk.Button(self.nav_frame, text="▶", command=self.move_right,
+                                     font=self.button_font, bg="#555555", fg="white", relief=tk.FLAT)
+        self.next_button.pack(side=tk.RIGHT, padx=5)
+        self.slider = tk.Scale(self.nav_frame, from_=0, to=0, orient=tk.HORIZONTAL, command=self.slider_update,
+                               length=300, bg="#2E2E2E", fg="white")
+        self.slider.pack(side=tk.LEFT, expand=True, fill=tk.X, padx=5)
+
         # Фрейм для сводной таблицы
-        self.summary_frame = tk.Frame(self.main_frame, bg="#2E2E2E")
-        self.summary_frame.pack(side=tk.BOTTOM, anchor="w", fill=tk.X, padx=10, pady=10)
+        self.summary_frame = tk.Frame(self.main_frame, bg="#2E2E2E", height=50)
+        self.summary_frame.pack(side=tk.BOTTOM, anchor="w", fill=tk.BOTH,expand=True, padx=10, pady=10)
+        self.summary_frame.pack_propagate(False)
 
         # Создаем фигуру и ось для графика
         self.figure, self.ax = plt.subplots(figsize=(8, 4), facecolor="#2E2E2E")
@@ -137,6 +154,13 @@ class CSVGraphApp:
         self.toolbar = NavigationToolbar2Tk(self.canvas, self.toolbar_frame, pack_toolbar=False)
         self.toolbar.pack(side=tk.TOP, fill=tk.X)
 
+        # Для tooltip - теперь окно не уничтожается, а скрывается (withdraw)
+        self.tooltip_window = tk.Toplevel(self.root)
+        self.tooltip_window.wm_overrideredirect(True)
+        self.tooltip_window.withdraw()
+        self.tooltip_label = tk.Label(self.tooltip_window, font=self.font, bg="#333333", fg="white", relief=tk.SOLID)
+        self.tooltip_label.pack(padx=5, pady=5)
+
         # Выделение при hover
         self._facecolors = None
         self.tooltip_window = None
@@ -145,10 +169,10 @@ class CSVGraphApp:
         self.update_interval = 0  # 100 мс
         self.last_update_time = 0
         self.norm_tooltips = []
-        self.norm_collection = []
+        self.norm_collection = None
         self.nack_tooltips = []
-        self.nack_collection = []
-        self.frame_collection = []
+        self.nack_collection = None
+        self.frame_collection = None
         self.frame_tooltips = []
         self.seq_info: dict = {}  # агрегированная информация по seq
         self.generated_color = 'lime'
@@ -167,6 +191,243 @@ class CSVGraphApp:
         # Оптимизация отрисовки
         self.square_width = 0.8
         self.gap = 0.2
+
+        # Параметры lazy rendering
+        self.visible_count = 200
+        self.current_start = 0
+
+    # ============================================================================
+    # Методы управления (слайдер, стрелки, обновление диапазона)
+    # ============================================================================
+
+    def slider_update(self, val):
+        self.current_start = int(val)
+        self.render_visible_range()
+
+    def move_left(self):
+        new_start = max(0, self.current_start - self.visible_count)
+        self.current_start = new_start
+        self.slider.set(new_start)
+        self.render_visible_range()
+
+    def move_right(self):
+        if self.data is None:
+            return
+        total = len(self.get_all_seq())
+        new_start = min(total - self.visible_count, self.current_start + self.visible_count)
+        self.current_start = new_start
+        self.slider.set(new_start)
+        self.render_visible_range()
+
+    def get_all_seq(self):
+        """Возвращает отсортированный список всех seq из загруженных данных."""
+        all_seq = set()
+        for _, row in self.data.iterrows():
+            for s in row["seq_list"]:
+                all_seq.add(s)
+        return sorted(all_seq)
+
+    def render_visible_range(self):
+        """
+        Отрисовывает только видимую часть графика.
+        Использует self.current_start и self.visible_count для фильтрации данных.
+        """
+        # Получаем полный список seq и сортируем
+        all_seq = set()
+        for _, row in self.data.iterrows():
+            for s in row["seq_list"]:
+                all_seq.add(s)
+        sorted_seq = sorted(all_seq)
+
+
+        # Вычисляем видимый срез
+        visible_seq = sorted_seq[self.current_start:self.current_start + self.visible_count]
+        # Для оси X нам нужен новый mapping visible_seq -> 0, 1, 2, ...
+        seq_to_index = {seq: i for i, seq in enumerate(visible_seq)}
+
+        # Очищаем ось
+        self.ax.clear()
+
+        # 1. Отрисовка нормальных событий (type != 3)
+        square_width = self.square_width
+        gap = self.gap
+        base_y = 0.5
+        self.seq_info = {}  # Пересобираем информацию только по видимым seq
+
+        normal_df = self.data[self.data["type"] != 3]
+        for seq in visible_seq:
+            # Выбираем строки, где видимый seq присутствует
+            group = normal_df[normal_df["seq_list"].apply(lambda lst: seq in lst)]
+            if not group.empty:
+                group = group.sort_values("timestamp")
+                events = group.to_dict("records")
+                types = group["type"].tolist()
+                if 2 in types:
+                    final_state = 2
+                elif 1 in types:
+                    final_state = 1
+                elif -1 in types:
+                    final_state = -1
+                else:
+                    final_state = -1
+                self.seq_info[seq] = {"final_state": final_state, "events": events}
+            else:
+                self.seq_info[seq] = {"final_state": 1, "events": []}
+
+        norm_rects = []
+        norm_colors = []
+        self.norm_tooltips = []
+        for seq, data in self.seq_info.items():
+            idx = seq_to_index.get(seq)
+            if idx is None:
+                continue
+            x_coord = idx * (square_width + gap)
+            norm_rects.append(plt.Rectangle((x_coord, base_y), square_width, 0.5))
+            norm_colors.append(self.colors.get(data["final_state"], "#FFFFFF"))
+            # Получаем tooltip для данного seq (можно вызывать свой метод)
+            self.norm_tooltips.append(self.get_tooltip_text(seq))
+        norm_collection = PatchCollection(norm_rects, facecolors=norm_colors, edgecolors='none', picker=True)
+        self.ax.add_collection(norm_collection)
+        self.norm_collection = norm_collection
+
+        # 2. Отрисовка NACK-событий (type == 3) для видимой области
+        # Отбираем только те nack, у которых хотя бы один seq попадает в visible_seq
+        nack_df = self.data[self.data["type"] == 3]
+        nack_boxes = []
+        self.nack_tooltips = []
+        nack_points_x = []
+        nack_points_y = []
+        lines = []  # для вычисления вертикального сдвига
+
+        def intervals_overlap(a1, b1, a2, b2):
+            return not (b1 < a2 or a1 > b2)
+
+        rect_height = 0.07
+        line_spacing = 0.003
+        first_line_offset = 0.075
+
+        for _, row in nack_df.iterrows():
+            seq_list = row["seq_list"]
+
+            formatted_time = row["timestamp"].strftime('%Y-%m-%d %H:%M:%S')
+            milliseconds = int(row["timestamp"].microsecond / 1000)
+            formatted_time += f":{milliseconds:03d}"
+            # Фильтруем только те seq, которые видимы
+            visible_in_event = [s for s in seq_list if s in seq_to_index]
+            if not visible_in_event:
+                continue
+            min_seq = min(visible_in_event)
+            max_seq = max(visible_in_event)
+            min_idx = seq_to_index.get(min_seq)
+            max_idx = seq_to_index.get(max_seq)
+            if min_idx is None or max_idx is None:
+                continue
+            start_interval = min_idx
+            end_interval = max_idx
+            line_index = None
+            for i, intervals in enumerate(lines):
+                if all(not intervals_overlap(start_interval, end_interval, a, b) for (a, b) in intervals):
+                    line_index = i
+                    intervals.append((start_interval, end_interval))
+                    break
+            if line_index is None:
+                line_index = len(lines)
+                lines.append([(start_interval, end_interval)])
+            x_start = min_idx * (square_width + gap)
+            x_end = max_idx * (square_width + gap) + square_width
+            width_rect = x_end - x_start
+            rect_y = base_y - first_line_offset - line_index * (rect_height + line_spacing)
+            box = plt.Rectangle((x_start, rect_y), width_rect, rect_height)
+            box.tooltip = f"NACK: {visible_in_event}\n Timestamp: {formatted_time}"
+            nack_boxes.append(box)
+            self.nack_tooltips.append(box.tooltip)
+            for s in visible_in_event:
+                idx = seq_to_index.get(s)
+                if idx is None:
+                    continue
+                x_center = idx * (square_width + gap) + square_width / 2
+                y_center = rect_y + rect_height / 2
+                nack_points_x.append(x_center)
+                nack_points_y.append(y_center)
+        if nack_boxes:
+            nack_collection = PatchCollection(nack_boxes, facecolors="cyan", alpha=0.7, edgecolor="none", picker=True)
+            self.ax.add_collection(nack_collection)
+            self.nack_collection = nack_collection
+        else:
+            self.nack_collection = None
+        if nack_points_x and nack_points_y:
+            self.ax.scatter(nack_points_x, nack_points_y, s=25, marker="o", color="red", zorder=3)
+
+        # 3. Отрисовка Frame-боксов (блоки по 10 seq) для видимой области
+        block_size = 10
+        frame_boxes = []
+        self.frame_tooltips = []
+        frame_colors = []
+        visible_total = len(visible_seq)
+        for i in range(0, visible_total, block_size):
+            block = visible_seq[i:i + block_size]
+            block_state = "Generated"
+            block_color = self.generated_color
+            for s in block:
+                if s in self.seq_info and self.seq_info[s]["final_state"] == -1:
+                    block_state = "UnGenerated"
+                    block_color = self.ungenerated_color
+                    break
+            start_idx = i
+            block_width = len(block) * (square_width + gap)
+            x_start = start_idx * (square_width + gap)
+            rect = plt.Rectangle((x_start, 1.1), block_width, 0.2)
+            rect.tooltip = f"Frame: {block_state} ({block[0]} - {block[-1]})"
+            frame_boxes.append(rect)
+            frame_colors.append(block_color)
+            self.frame_tooltips.append(rect.tooltip)
+            self.ax.text(x_start + block_width / 2, 1.2, f"Frame: {block_state}", color="white",
+                         fontsize=10, ha="center", va="center", zorder=2)
+        if frame_boxes:
+            frame_collection = PatchCollection(frame_boxes,
+                                               facecolors=frame_colors,
+                                               alpha=0.5, edgecolor="none", picker=True)
+            self.ax.add_collection(frame_collection)
+            self.frame_collection = frame_collection
+        else:
+            self.frame_collection = None
+
+        # 4. Настройка осей для видимой области
+        total_visible = len(visible_seq)
+        total_width = total_visible * (square_width + gap)
+        # Определяем y_min исходя из nack-боксов
+        if lines:
+            last_line_y = base_y - first_line_offset - (len(lines) - 1) * (rect_height + line_spacing)
+            y_min = last_line_y - 0.3
+        else:
+            y_min = 0
+        self.ax.set_xlim(0, total_width)
+        self.ax.set_ylim(y_min, 1.5)
+        self.ax.get_yaxis().set_visible(False)
+        xticks = [i * (square_width + gap) + square_width / 2 for i in range(total_visible)]
+        xlabels = [str(seq) for seq in visible_seq]
+        self.ax.set_xticks(xticks)
+        self.ax.set_xticklabels(xlabels, color="white", fontsize=12, rotation=90)
+        self.update_summary_table()
+        self.canvas.draw()
+
+    def setup_slider(self):
+        """Создаёт слайдер для управления диапазоном отображаемых seq."""
+        all_seq = self.get_all_seq()
+        total = len(all_seq)
+        # Если общее число seq меньше видимого диапазона, слайдер не нужен
+        if total <= self.visible_count:
+            return
+        self.slider = tk.Scale(self.control_frame, from_=0, to=total - self.visible_count,
+                               orient=tk.HORIZONTAL, command=lambda val: self.update_visible_range(int(val)))
+        self.slider.pack(side=tk.LEFT, padx=10)
+        # Сохраняем начальное значение
+        self.current_start = 0
+
+    def update_visible_range(self, new_start):
+        """Обновляет отображаемый диапазон, устанавливая новый current_start и перерисовывая видимую область."""
+        self.current_start = new_start
+        self.render_visible_range()
 
     def center_half_screen(self):
         """
@@ -220,7 +481,8 @@ class CSVGraphApp:
         if not self.tooltip_window or not hasattr(self, "last_event"):
             return
 
-        _, tooltip_text, _ = self._find_tooltip(self.last_event)
+        _, tooltip_text, _ = self._find_tooltip(self.last_event, apply_check_vars=True)
+
         if tooltip_text:
             for widget in self.tooltip_window.winfo_children():
                 widget.config(text=tooltip_text)
@@ -308,6 +570,21 @@ class CSVGraphApp:
                 print(f"[DEBUG] Ошибка преобразования 'seq' {seq_val} в int: {e}")
                 return []
 
+    def clear_graph(self):
+        """Очищает график и все связанные коллекции перед построением нового графика."""
+        self.ax.clear()
+        # Сброс всех коллекций, если они используются
+        self.norm_collection = None
+        self.nack_collection = None
+        self.frame_collection = None
+        # Можно сбросить и другие переменные, связанные с предыдущей отрисовкой
+        self.norm_tooltips = []
+        self.nack_tooltips = []
+        self.frame_tooltips = []
+        self.seq_info = {}
+        # Обновляем canvas, чтобы изменения отобразились
+        self.canvas.draw()
+
     def load_csv(self):
         """
          /**
@@ -325,7 +602,7 @@ class CSVGraphApp:
             df["type"] = df["type"].astype(float)
             if "count" not in df.columns:
                 df["count"] = 1
-            df["timestamp"] = pd.to_datetime(df["timestamp"], unit="ms", errors="coerce")
+            df["timestamp"] = pd.to_datetime(df["timestamp"], unit="ms", errors="coerce", utc=True).dt.tz_convert(get_system_timezone())
             df = df.dropna(subset=["timestamp"])
             self.data = df
             # Проверяем, что файл file_path - строка
@@ -334,225 +611,24 @@ class CSVGraphApp:
                 self.file_label.config(text=f"Выбран файл: {filename}")
             else:
                 self.file_label.config(text="Ошибка: Некорректный путь к файлу")
-            self.plot_button.config(state=tk.NORMAL)
             # Отображаем основной контейнер, если он ещё не показан
             if not self.main_frame.winfo_ismapped():
                 self.main_frame.pack(fill=tk.BOTH, expand=True)
-            self.plot_graph()
+            # Очищаем график перед построением нового
+            self.clear_graph()
+
+            self.setup_slider()
+            self.render_visible_range()
         except Exception as e:
             self.file_label.config(text=f"Ошибка: {e}")
-            self.plot_button.config(state=tk.DISABLED)
-
-    def plot_graph(self):
-        """
-         1) Собирает все уникальные seq (из всех строк, независимо от type).
-         2) Отрисовывает нормальные события (type != 3) на y=0.5.
-         3) Для nack (type == 3) рисует тонкие прямоугольники снизу, ближе к bar_patch:
-            - Если нет пересечения по seq, располагается на «нулевой» линии (base_y - 0.2).
-            - Если пересекается, сдвигается на линию ниже (line_spacing).
-            - Внутри прямоугольника рисуются точки по центру.
-         4) Рисует состояние фрейма (блоки по 10 seq).
-         5) Настраивает оси, масштаб и обновляет сводную таблицу.
-        """
-        from matplotlib.patches import Rectangle
-        from matplotlib.collections import PatchCollection
-
-        if self.data is None or self.data.empty:
-            return
-
-        # 1. Очистка предыдущего графика
-        self.ax.clear()
-
-        # Собираем все seq из seq_list
-        all_seq = set()
-        for _, row in self.data.iterrows():
-            for s in row["seq_list"]:
-                all_seq.add(s)
-        sorted_seq = sorted(all_seq)
-        seq_to_index = {seq: i for i, seq in enumerate(sorted_seq)}
-
-        # Отрисовываем прямоугольники для нормальных событий
-        square_width = 0.8
-        gap = 0.2
-        base_y = 0.5
-
-        # 2. Нормальные события (type != 3)
-        normal_df = self.data[self.data["type"] != 3]
-        for seq in sorted_seq:
-            # Выбираем все строки из normal_df, где seq содержится в seq_list
-            group = normal_df[normal_df["seq_list"].apply(lambda lst: seq in lst)]
-            events = group.sort_values("timestamp").to_dict('records')
-            types = group["type"].tolist()
-            if 2 in types:
-                final_state = 2
-            elif 1 in types:
-                final_state = 1
-            elif -1 in types:
-                final_state = -1
-            else:
-                final_state = -1
-            self.seq_info[seq] = {"final_state": final_state, "events": events}
-
-        norm_rects = []
-        norm_colors = []
-        self.norm_tooltips = []
-        for seq, data in self.seq_info.items():
-            idx = seq_to_index.get(seq)
-            if idx is None:
-                continue
-            x_coord = idx * (square_width + gap)
-            norm_rects.append(Rectangle((x_coord, base_y), square_width, 0.5))
-            norm_colors.append(self.colors.get(data["final_state"], "#FFFFFF"))
-            self.norm_tooltips.append(self.get_tooltip_text(seq))
-
-        self.norm_collection = PatchCollection(norm_rects, facecolors=norm_colors, edgecolors='none', picker=True)
-        self.ax.add_collection(self.norm_collection)
-
-        # 3. Nack-события (type == 3)
-        # Здесь мы будем собирать nack-боксы в список и точки в отдельные массивы.
-        nack_boxes = []
-        nack_points_x = []
-        nack_points_y = []
-
-        # Для размещения nack-боксов используем "линии": если интервалы (по индексам) пересекаются, сдвигаемся вниз.
-        lines = []
-
-        def intervals_overlap(a1, b1, a2, b2):
-            return not (b1 < a2 or a1 > b2)
-
-        # Параметры nack-боксов
-        rect_height = 0.07  # тонкий прямоугольник
-        line_spacing = 0.05  # вертикальный отступ между линиями, если пересекаются
-        first_line_offset = 0.075  # отступ первой nack-линии от base_y
-
-        for _, row in self.data[self.data["type"] == 3].iterrows():
-            seq_list = row["seq_list"]
-            if not seq_list:
-                continue
-            min_seq = min(seq_list)
-            max_seq = max(seq_list)
-            min_idx = seq_to_index.get(min_seq)
-            max_idx = seq_to_index.get(max_seq)
-            if min_idx is None or max_idx is None:
-                continue
-            start_interval = min_idx
-            end_interval = max_idx
-            line_index = None
-            for i, intervals in enumerate(lines):
-                if all(not intervals_overlap(start_interval, end_interval, a, b) for (a, b) in intervals):
-                    line_index = i
-                    intervals.append((start_interval, end_interval))
-                    break
-            if line_index is None:
-                line_index = len(lines)
-                lines.append([(start_interval, end_interval)])
-            x_start = min_idx * (self.square_width + self.gap)
-            x_end = max_idx * (self.square_width + self.gap) + self.square_width
-            width_rect = x_end - x_start
-            rect_y = base_y - first_line_offset - line_index * (rect_height + line_spacing)
-            box = Rectangle((x_start, rect_y), width_rect, rect_height)
-            box.tooltip = f"NACK: {seq_list}"
-            nack_boxes.append(box)
-            self.nack_tooltips.append(box.tooltip)
-            # Для каждой seq из seq_list, точки располагаются по центру соответствующего столбца
-            for s in seq_list:
-                idx = seq_to_index.get(s)
-                if idx is None:
-                    continue
-                x_center = idx * (square_width + gap) + square_width / 2
-                y_center = rect_y + rect_height / 2
-                nack_points_x.append(x_center)
-                nack_points_y.append(y_center)
-
-        if nack_boxes:
-            self.nack_collection = PatchCollection(nack_boxes, facecolors="cyan", alpha=0.7, edgecolor="none",
-                                                   picker=True)
-            self.ax.add_collection(self.nack_collection)
-        else:
-            self.nack_collection = None
-
-        if nack_points_x and nack_points_y:
-            self.ax.scatter(nack_points_x, nack_points_y, s=25, marker="o", color="red", zorder=3)
-
-        # 4. Состояние фрейма по блокам 10 seq
-        block_size = 10
-        frame_boxes = []
-        frame_colors = []  # Список цветов для PatchCollection
-        self.frame_tooltips = []
-        for i in range(0, len(sorted_seq), block_size):
-            block = sorted_seq[i:i + block_size]
-            block_state = "Generated"
-            block_color = self.generated_color
-            for s in block:
-                if s in self.seq_info and self.seq_info[s]["final_state"] == -1:
-                    block_state = "UnGenerated"
-                    block_color = self.ungenerated_color
-                    break
-            start_idx = i
-            block_width = len(block) * (self.square_width + self.gap)
-            x_start = start_idx * (self.square_width + self.gap)
-            rect = matplotlib.patches.Rectangle((x_start, 1.1), block_width, 0.2)
-            frame_boxes.append(rect)
-            frame_colors.append(block_color)  # Добавляем цвет в список
-            self.frame_tooltips.append(f"Frame: {block_state} ({block[0]} - {block[-1]})")
-            self.ax.text(x_start + block_width / 2, 1.2, f"Frame: {block_state}", color="white",
-                         fontsize=10, ha="center", va="center", zorder=2)
-
-        if frame_boxes:
-            self.frame_collection = PatchCollection(frame_boxes, facecolors=frame_colors, alpha=0.5,
-                                                    edgecolor="none", picker=True)
-            self.ax.add_collection(self.frame_collection)
-        else:
-            self.frame_collection = None
-
-        # 5. Настраиваем оси
-        total_seq = len(sorted_seq)
-        total_width = total_seq * (self.square_width + self.gap)
-
-        line_count = len(lines)
-        if line_count > 0:
-            # самая последняя линия: line_count-1
-            last_line_y = base_y - first_line_offset - (line_count - 1) * (rect_height + line_spacing)
-            # небольшой запас снизу
-            y_min = last_line_y - 0.3
-        else:
-            y_min = 0
-
-        self.ax.set_xlim(0, total_width)
-        self.ax.set_ylim(y_min, 1.5)
-        self.ax.get_yaxis().set_visible(False)
-        for spine in ["top", "left", "right"]:
-            self.ax.spines[spine].set_visible(False)
-
-        # xticks и xlabels
-        xticks = [i * (square_width + gap) + square_width / 2 for i in range(total_seq)]
-        xlabels = [str(seq) for seq in sorted_seq]
-        self.ax.set_xticks(xticks)
-        self.ax.set_xticklabels(xlabels, color="white", fontsize=12, rotation=90)
-
-        def format_coord(x_val, _y_val):
-            i_index = int(x_val // (square_width + gap))
-            if 0 <= i_index < len(sorted_seq):
-                return f"seq={sorted_seq[i_index]}"
-            else:
-                return ""
-
-        self.ax.format_coord = format_coord
-
-        width_inches = max(8, math.ceil(total_width))
-        self.figure.set_size_inches(width_inches, 4, forward=True)
-        self.canvas.draw()
-
-        # 6. Обновляем сводную таблицу
-        self.update_summary_table()
 
     def update_summary_table(self):
         """
-         /**
-          * Вычисляет и обновляет сводную таблицу подсчёта.
-          */
+        Вычисляет и обновляет сводную таблицу подсчёта для всех seq,
+        присутствующих в загруженных данных.
         """
-        total_seq = len(self.seq_info)
+        all_seq = self.get_all_seq()  # Получаем полный список seq
+        total_seq = len(all_seq)
         total_received = sum(1 for info in self.seq_info.values() if info["final_state"] in [1, 2])
         total_lost = sum(1 for info in self.seq_info.values() if info["final_state"] == -1)
         recovery_count = sum(1 for info in self.seq_info.values() if info["final_state"] == 2)
@@ -566,7 +642,7 @@ class CSVGraphApp:
         if self.summary_label is None:
             self.summary_label = tk.Label(self.summary_frame, text=summary_text, font=self.font,
                                           bg="#2E2E2E", fg="white", bd=1, relief=tk.SOLID, padx=5, pady=5)
-            self.summary_label.pack(side=tk.LEFT, anchor="w", padx=5, pady=5)
+            self.summary_label.pack(side=tk.BOTTOM, anchor="w", padx=5, pady=5)
         else:
             self.summary_label.config(text=summary_text)
 
@@ -592,7 +668,11 @@ class CSVGraphApp:
         if self.check_vars["timestamp"].get():
             timestamps = []
             for event in events:
+                # Форматируем дату и время с миллисекундами
                 formatted_time = event['timestamp'].strftime('%Y-%m-%d %H:%M:%S')
+                milliseconds = int(event['timestamp'].microsecond / 1000)
+                formatted_time += f":{milliseconds:03d}"
+
                 if event["type"] in (1.0, -1.0):
                     timestamps.append("Timestamp: " + formatted_time)
                 else:
@@ -665,28 +745,61 @@ class CSVGraphApp:
 
         self.canvas.draw_idle()
 
-    def _find_tooltip(self, event):
+    def _find_tooltip(self, event, apply_check_vars=True):
         """
         Вспомогательный метод, который по событию (event) проверяет все три коллекции:
         нормальные объекты, nack‑боксы и frame‑боксы.
         Возвращает кортеж (index, tooltip_text, collection), если найден подходящий элемент,
         иначе (None, None, None).
+
+        :param event: Событие курсора
+        :param apply_check_vars: Нужно ли применять фильтрацию полей согласно чекбоксам
+        :return: (index, tooltip_text, collection)
         """
-        # Список коллекций вместе с соответствующими массивами tooltip
         collections = [
             (self.norm_collection, self.norm_tooltips),
             (self.nack_collection, self.nack_tooltips),
             (self.frame_collection, self.frame_tooltips)
         ]
+
         for collection, tooltips in collections:
             if collection is not None:
                 contains, info = collection.contains(event)
                 if contains and "ind" in info and len(info["ind"]) > 0:
                     idx = info["ind"][0]
                     if idx < len(tooltips):
-                        return idx, tooltips[idx], collection
+                        tooltip_text = tooltips[idx]
+
+                        # Если включена фильтрация, применяем её к tooltip
+                        if apply_check_vars:
+                            tooltip_text = self._filter_tooltip(tooltip_text)
+
+                        return idx, tooltip_text, collection
+
         return None, None, None
 
+    def _filter_tooltip(self, tooltip_text):
+        """
+        Фильтрует содержимое tooltip согласно активным чекбоксам.
+
+        :param tooltip_text: оригинальный текст tooltip.
+        :return: отфильтрованный текст.
+        """
+        lines = tooltip_text.split("\n")
+        filtered_lines = []
+
+        for line in lines:
+            if "Seq:" in line and not self.check_vars["seq"].get():
+                continue
+            if "Timestamp:" in line and not self.check_vars["timestamp"].get():
+                continue
+            if "Events:" in line and not self.check_vars["events"].get():
+                continue
+            if "Count:" in line and not self.check_vars["count"].get():
+                continue
+            filtered_lines.append(line)
+
+        return "\n".join(filtered_lines) if filtered_lines else None
 
     def show_tooltip(self, text):
         """
