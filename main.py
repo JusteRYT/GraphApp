@@ -1,14 +1,11 @@
-import datetime
 import os
 import tkinter as tk
-from tzlocal import get_localzone
 from tkinter import filedialog, ttk
 import pandas as pd
 import matplotlib
 import matplotlib.pyplot as plt
 import ast
 
-import pytz
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg, NavigationToolbar2Tk
 from matplotlib.collections import PatchCollection
 
@@ -36,10 +33,10 @@ def _format_final_state_2(seq, events):
         elif event["type"] == -1:
             lost_event = event
 
-    def format_timestamp(event):
+    def format_timestamp(event_value):
         """Форматирует timestamp с миллисекундами."""
-        formatted_time = event['timestamp'].strftime('%Y-%m-%d %H:%M:%S')
-        milliseconds = int(event['timestamp'].microsecond / 1000)
+        formatted_time = event_value['timestamp'].strftime('%Y-%m-%d %H:%M:%S')
+        milliseconds = int(event_value['timestamp'].microsecond / 1000)
         return f"{formatted_time}:{milliseconds:03d}"
 
     if lost_event is not None and resend_event is not None:
@@ -57,7 +54,6 @@ def get_system_timezone():
     """
     try:
         localtime_path = os.readlink("/etc/localtime")
-        # Ожидаем, что путь будет иметь вид /usr/share/zoneinfo/<Area>/<Location>
         parts = localtime_path.split("/")
         if len(parts) > 4 and parts[1] == "usr" and parts[2] == "share" and parts[3] == "zoneinfo":
             return "/".join(parts[4:])  # Area/Location
@@ -137,9 +133,9 @@ class CSVGraphApp:
         self.next_button = tk.Button(self.nav_frame, text="▶", command=self.move_right,
                                      font=self.button_font, bg="#555555", fg="white", relief=tk.FLAT)
         self.next_button.pack(side=tk.RIGHT, padx=5)
-        self.slider = tk.Scale(self.nav_frame, from_=0, to=0, orient=tk.HORIZONTAL, command=self.slider_update,
-                               length=300, bg="#2E2E2E", fg="white")
-        self.slider.pack(side=tk.LEFT, expand=True, fill=tk.X, padx=5)
+        self.slider = tk.Scale(self.nav_frame, from_=0, to=0, orient=tk.HORIZONTAL,
+                               command=self.slider_update, length=500,
+                               bg="#2E2E2E", fg="white", highlightthickness=0)
 
         # Фрейм для сводной таблицы
         self.summary_frame = tk.Frame(self.main_frame, bg="#2E2E2E", height=50)
@@ -172,6 +168,7 @@ class CSVGraphApp:
         self.norm_collection = None
         self.nack_tooltips = []
         self.nack_collection = None
+        self.nack_points_collection = None
         self.frame_collection = None
         self.frame_tooltips = []
         self.seq_info: dict = {}  # агрегированная информация по seq
@@ -228,201 +225,197 @@ class CSVGraphApp:
         return sorted(all_seq)
 
     def render_visible_range(self):
-        """
-        Отрисовывает только видимую часть графика.
-        Использует self.current_start и self.visible_count для фильтрации данных.
-        """
-        # Получаем полный список seq и сортируем
-        all_seq = set()
-        for _, row in self.data.iterrows():
-            for s in row["seq_list"]:
-                all_seq.add(s)
-        sorted_seq = sorted(all_seq)
+        """Оптимизированная отрисовка только видимой области с учетом наложения NACK"""
 
+        if self.data is None:
+            return
 
-        # Вычисляем видимый срез
-        visible_seq = sorted_seq[self.current_start:self.current_start + self.visible_count]
-        # Для оси X нам нужен новый mapping visible_seq -> 0, 1, 2, ...
+        all_seq = self.get_all_seq()
+        if not all_seq:
+            return
+
+        visible_seq = all_seq[self.current_start:self.current_start + self.visible_count]
         seq_to_index = {seq: i for i, seq in enumerate(visible_seq)}
 
-        # Очищаем ось
-        self.ax.clear()
+        # 1. Кешируем seq_info при первой загрузке
+        if not self.seq_info:
+            self.seq_info = {seq: {"final_state": 1, "events": []} for seq in all_seq}
+            normal_df = self.data[self.data["type"] != 3]
 
-        # 1. Отрисовка нормальных событий (type != 3)
-        square_width = self.square_width
-        gap = self.gap
-        base_y = 0.5
-        self.seq_info = {}  # Пересобираем информацию только по видимым seq
+            for _, row in normal_df.iterrows():
+                for seq in row["seq_list"]:
+                    if seq in self.seq_info:
+                        event = row.to_dict()
+                        self.seq_info[seq]["events"].append(event)
 
-        normal_df = self.data[self.data["type"] != 3]
-        for seq in visible_seq:
-            # Выбираем строки, где видимый seq присутствует
-            group = normal_df[normal_df["seq_list"].apply(lambda lst: seq in lst)]
-            if not group.empty:
-                group = group.sort_values("timestamp")
-                events = group.to_dict("records")
-                types = group["type"].tolist()
-                if 2 in types:
-                    final_state = 2
-                elif 1 in types:
-                    final_state = 1
-                elif -1 in types:
-                    final_state = -1
-                else:
-                    final_state = -1
-                self.seq_info[seq] = {"final_state": final_state, "events": events}
-            else:
-                self.seq_info[seq] = {"final_state": 1, "events": []}
+                        # Определяем final_state
+                        event_type = row["type"]
+                        if event_type == 2:
+                            self.seq_info[seq]["final_state"] = 2
+                        elif event_type == -1 and self.seq_info[seq]["final_state"] != 2:
+                            self.seq_info[seq]["final_state"] = -1
+                        elif event_type == 1 and self.seq_info[seq]["final_state"] == 1:
+                            self.seq_info[seq]["final_state"] = 1
 
-        norm_rects = []
-        norm_colors = []
+        # 2. Отрисовка нормальных событий
+        norm_rects, norm_colors = [], []
         self.norm_tooltips = []
-        for seq, data in self.seq_info.items():
+
+        for seq in visible_seq:
             idx = seq_to_index.get(seq)
             if idx is None:
                 continue
-            x_coord = idx * (square_width + gap)
-            norm_rects.append(plt.Rectangle((x_coord, base_y), square_width, 0.5))
-            norm_colors.append(self.colors.get(data["final_state"], "#FFFFFF"))
-            # Получаем tooltip для данного seq (можно вызывать свой метод)
-            self.norm_tooltips.append(self.get_tooltip_text(seq))
-        norm_collection = PatchCollection(norm_rects, facecolors=norm_colors, edgecolors='none', picker=True)
-        self.ax.add_collection(norm_collection)
-        self.norm_collection = norm_collection
 
-        # 2. Отрисовка NACK-событий (type == 3) для видимой области
-        # Отбираем только те nack, у которых хотя бы один seq попадает в visible_seq
+            x_coord = idx * (self.square_width + self.gap)
+            norm_rects.append(plt.Rectangle((x_coord, 0.5), self.square_width, 0.5))
+            norm_colors.append(self.colors.get(self.seq_info[seq]["final_state"], "#FFFFFF"))
+            self.norm_tooltips.append(self.get_tooltip_text(seq))
+
+        if self.norm_collection:
+            self.norm_collection.remove()
+        self.norm_collection = PatchCollection(norm_rects, facecolors=norm_colors, edgecolors='none', picker=True)
+        self.ax.add_collection(self.norm_collection)
+
+        # 3. Отрисовка NACK-событий (полностью, если они хоть частично видны)
         nack_df = self.data[self.data["type"] == 3]
-        nack_boxes = []
-        self.nack_tooltips = []
-        nack_points_x = []
-        nack_points_y = []
-        lines = []  # для вычисления вертикального сдвига
+        nack_boxes, nack_tooltips, nack_points = [], [], []
+        lines = []  # Хранит уровни размещения NACK-событий
 
         def intervals_overlap(a1, b1, a2, b2):
+            """Проверяет, пересекаются ли два отрезка на шкале X"""
             return not (b1 < a2 or a1 > b2)
 
         rect_height = 0.07
         line_spacing = 0.003
-        first_line_offset = 0.075
 
         for _, row in nack_df.iterrows():
             seq_list = row["seq_list"]
 
-            formatted_time = row["timestamp"].strftime('%Y-%m-%d %H:%M:%S')
-            milliseconds = int(row["timestamp"].microsecond / 1000)
-            formatted_time += f":{milliseconds:03d}"
-            # Фильтруем только те seq, которые видимы
-            visible_in_event = [s for s in seq_list if s in seq_to_index]
+            # Если хотя бы один seq попадает в visible_seq, рисуем весь NACK
+            visible_in_event = [s for s in seq_list if s in visible_seq]
             if not visible_in_event:
                 continue
-            min_seq = min(visible_in_event)
-            max_seq = max(visible_in_event)
-            min_idx = seq_to_index.get(min_seq)
-            max_idx = seq_to_index.get(max_seq)
-            if min_idx is None or max_idx is None:
-                continue
-            start_interval = min_idx
-            end_interval = max_idx
+
+            # Берем мин/макс из всей строки, а не только visible_seq
+            min_seq, max_seq = min(seq_list), max(seq_list)
+            min_idx, max_idx = seq_to_index.get(min_seq, 0), seq_to_index.get(max_seq, len(visible_seq) - 1)
+
+            x_start = min_idx * (self.square_width + self.gap)
+            x_end = max_idx * (self.square_width + self.gap) + self.square_width
+            width_rect = x_end - x_start
+
+            # Определяем уровень для NACK, чтобы избежать наложения
             line_index = None
             for i, intervals in enumerate(lines):
-                if all(not intervals_overlap(start_interval, end_interval, a, b) for (a, b) in intervals):
+                if all(not intervals_overlap(x_start, x_end, a, b) for (a, b) in intervals):
                     line_index = i
-                    intervals.append((start_interval, end_interval))
+                    intervals.append((x_start, x_end))
                     break
             if line_index is None:
                 line_index = len(lines)
-                lines.append([(start_interval, end_interval)])
-            x_start = min_idx * (square_width + gap)
-            x_end = max_idx * (square_width + gap) + square_width
-            width_rect = x_end - x_start
-            rect_y = base_y - first_line_offset - line_index * (rect_height + line_spacing)
+                lines.append([(x_start, x_end)])
+
+            rect_y = 0.3 - line_index * (rect_height + line_spacing)  # Смещаем вниз при наложении
+
             box = plt.Rectangle((x_start, rect_y), width_rect, rect_height)
-            box.tooltip = f"NACK: {visible_in_event}\n Timestamp: {formatted_time}"
+            box.tooltip = f"NACK: {seq_list}\nTimestamp: {row['timestamp']}"
             nack_boxes.append(box)
-            self.nack_tooltips.append(box.tooltip)
-            for s in visible_in_event:
-                idx = seq_to_index.get(s)
+            nack_tooltips.append(box.tooltip)
+
+            for s in seq_list:
+                idx = seq_to_index.get(s, None)
                 if idx is None:
                     continue
-                x_center = idx * (square_width + gap) + square_width / 2
-                y_center = rect_y + rect_height / 2
-                nack_points_x.append(x_center)
-                nack_points_y.append(y_center)
+                x_center = idx * (self.square_width + self.gap) + self.square_width / 2
+                y_center = rect_y + rect_height / 2  # Центр прямоугольника
+                nack_points.append((x_center, y_center))
+
+        if self.nack_collection:
+            self.nack_collection.remove()
         if nack_boxes:
-            nack_collection = PatchCollection(nack_boxes, facecolors="cyan", alpha=0.7, edgecolor="none", picker=True)
-            self.ax.add_collection(nack_collection)
-            self.nack_collection = nack_collection
+            self.nack_collection = PatchCollection(nack_boxes, facecolors="cyan", alpha=0.7, edgecolor="none",
+                                                   picker=True)
+            self.ax.add_collection(self.nack_collection)
+            self.nack_tooltips = nack_tooltips
         else:
             self.nack_collection = None
-        if nack_points_x and nack_points_y:
-            self.ax.scatter(nack_points_x, nack_points_y, s=25, marker="o", color="red", zorder=3)
 
-        # 3. Отрисовка Frame-боксов (блоки по 10 seq) для видимой области
+        if self.nack_points_collection:
+            self.nack_points_collection.remove()
+        if nack_points:
+            x, y = zip(*nack_points)
+            self.nack_points_collection = self.ax.scatter(x, y, s=25, marker="o", color="red", zorder=3)
+        else:
+            self.nack_points_collection = None
+
+        # 4. Отрисовка Frame-боксов
+        frame_boxes, frame_colors, frame_tooltips = [], [], []
         block_size = 10
-        frame_boxes = []
-        self.frame_tooltips = []
-        frame_colors = []
-        visible_total = len(visible_seq)
-        for i in range(0, visible_total, block_size):
+        for i in range(0, len(visible_seq), block_size):
             block = visible_seq[i:i + block_size]
             block_state = "Generated"
             block_color = self.generated_color
+
             for s in block:
-                if s in self.seq_info and self.seq_info[s]["final_state"] == -1:
+                if self.seq_info.get(s, {}).get("final_state") == -1:
                     block_state = "UnGenerated"
                     block_color = self.ungenerated_color
                     break
-            start_idx = i
-            block_width = len(block) * (square_width + gap)
-            x_start = start_idx * (square_width + gap)
+
+            x_start = i * (self.square_width + self.gap)
+            block_width = len(block) * (self.square_width + self.gap)
+
             rect = plt.Rectangle((x_start, 1.1), block_width, 0.2)
-            rect.tooltip = f"Frame: {block_state} ({block[0]} - {block[-1]})"
             frame_boxes.append(rect)
             frame_colors.append(block_color)
-            self.frame_tooltips.append(rect.tooltip)
+            frame_tooltips.append(f"Frame: {block_state} ({block[0]} - {block[-1]})")
+
             self.ax.text(x_start + block_width / 2, 1.2, f"Frame: {block_state}", color="white",
                          fontsize=10, ha="center", va="center", zorder=2)
+
+        if self.frame_collection:
+            self.frame_collection.remove()
         if frame_boxes:
-            frame_collection = PatchCollection(frame_boxes,
-                                               facecolors=frame_colors,
-                                               alpha=0.5, edgecolor="none", picker=True)
-            self.ax.add_collection(frame_collection)
-            self.frame_collection = frame_collection
+            self.frame_collection = PatchCollection(frame_boxes, facecolors=frame_colors, alpha=0.5, edgecolor="none",
+                                                    picker=True)
+            self.ax.add_collection(self.frame_collection)
+            self.frame_tooltips = frame_tooltips
         else:
             self.frame_collection = None
 
-        # 4. Настройка осей для видимой области
+        # 5. Обновление осей
         total_visible = len(visible_seq)
-        total_width = total_visible * (square_width + gap)
-        # Определяем y_min исходя из nack-боксов
-        if lines:
-            last_line_y = base_y - first_line_offset - (len(lines) - 1) * (rect_height + line_spacing)
-            y_min = last_line_y - 0.3
-        else:
-            y_min = 0
+        total_width = total_visible * (self.square_width + self.gap)
+
         self.ax.set_xlim(0, total_width)
-        self.ax.set_ylim(y_min, 1.5)
+        self.ax.set_ylim(-0.5, 1.5)
         self.ax.get_yaxis().set_visible(False)
-        xticks = [i * (square_width + gap) + square_width / 2 for i in range(total_visible)]
+
+        xticks = [i * (self.square_width + self.gap) + self.square_width / 2 for i in range(total_visible)]
         xlabels = [str(seq) for seq in visible_seq]
+
         self.ax.set_xticks(xticks)
-        self.ax.set_xticklabels(xlabels, color="white", fontsize=12, rotation=90)
+        self.ax.set_xticklabels(xlabels, color="white", fontsize=10, rotation=90)
+
+        # 6. Обновление сводной таблицы
         self.update_summary_table()
-        self.canvas.draw()
+
+        # 7. Обновляем график только один раз
+        self.canvas.draw_idle()
 
     def setup_slider(self):
         """Создаёт слайдер для управления диапазоном отображаемых seq."""
         all_seq = self.get_all_seq()
-        total = len(all_seq)
-        # Если общее число seq меньше видимого диапазона, слайдер не нужен
-        if total <= self.visible_count:
+        if not all_seq:
             return
-        self.slider = tk.Scale(self.control_frame, from_=0, to=total - self.visible_count,
-                               orient=tk.HORIZONTAL, command=lambda val: self.update_visible_range(int(val)))
-        self.slider.pack(side=tk.LEFT, padx=10)
-        # Сохраняем начальное значение
-        self.current_start = 0
+        min_seq, max_seq = min(all_seq), max(all_seq)
+
+        # Обновляем границы слайдера
+        self.slider.config(from_=min_seq, to=max_seq - self.visible_count)
+
+        # Если слайдер еще не добавлен на экран, делаем это
+        if not self.slider.winfo_ismapped():
+            self.slider.pack(side=tk.LEFT, expand=True, fill=tk.X, padx=5)
 
     def update_visible_range(self, new_start):
         """Обновляет отображаемый диапазон, устанавливая новый current_start и перерисовывая видимую область."""
