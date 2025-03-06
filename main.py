@@ -9,11 +9,14 @@ import ast
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg, NavigationToolbar2Tk
 from matplotlib.collections import PatchCollection
 
+from detailProfile import profile_detailed
+from showProfile import profile_time
+
 # Используем TkAgg и темную тему
 matplotlib.use("TkAgg")
 plt.style.use('dark_background')
 
-
+@profile_time
 def _format_final_state_2(seq, events):
     """
     /**
@@ -32,7 +35,7 @@ def _format_final_state_2(seq, events):
             break
         elif event["type"] == -1:
             lost_event = event
-
+    @profile_time
     def format_timestamp(event_value):
         """Форматирует timestamp с миллисекундами."""
         formatted_time = event_value['timestamp'].strftime('%Y-%m-%d %H:%M:%S')
@@ -48,6 +51,7 @@ def _format_final_state_2(seq, events):
     else:
         return f"Seq: {seq}"
 
+@profile_time
 def get_system_timezone():
     """
     Пытается определить часовой пояс системы, используя /etc/localtime.
@@ -62,6 +66,11 @@ def get_system_timezone():
 
     return None  # Не удалось определить часовой пояс
 
+@profile_time
+def intervals_overlap(a1, b1, a2, b2):
+    """Проверяет, перекрываются ли два интервала"""
+    return not (b1 < a2 or a1 > b2)
+
 
 class CSVGraphApp:
     """
@@ -73,7 +82,7 @@ class CSVGraphApp:
     Tooltip для final_state == 2 формируется особым образом.
     Дополнительно реализован lazy rendering с элементами управления для перемещения по графику.
     """
-
+    @profile_detailed
     def __init__(self, master):
         """
          /**
@@ -169,12 +178,15 @@ class CSVGraphApp:
         self.nack_tooltips = []
         self.nack_collection = None
         self.nack_points_collection = None
+        self.nack_lines = []
         self.frame_collection = None
         self.frame_tooltips = []
         self.seq_info: dict = {}  # агрегированная информация по seq
         self.generated_color = 'lime'
         self.ungenerated_color = 'orangered'
         self.last_event = None
+        self.all_seq = None
+        self.isLoadTable = False
 
         self.data = None  # данные CSV
         self.canvas.mpl_connect("motion_notify_event", self.on_hover)
@@ -196,48 +208,36 @@ class CSVGraphApp:
     # ============================================================================
     # Методы управления (слайдер, стрелки, обновление диапазона)
     # ============================================================================
-
+    @profile_time
     def slider_update(self, val):
         self.current_start = int(val)
         self.render_visible_range()
 
+    @profile_time
     def move_left(self):
         new_start = max(0, self.current_start - self.visible_count)
         self.current_start = new_start
         self.slider.set(new_start)
         self.render_visible_range()
 
+    @profile_time
     def move_right(self):
         if self.data is None:
             return
-        total = len(self.get_all_seq())
+        total = len(self.all_seq)
         new_start = min(total - self.visible_count, self.current_start + self.visible_count)
         self.current_start = new_start
         self.slider.set(new_start)
         self.render_visible_range()
 
+    @profile_detailed
     def get_all_seq(self):
         """Возвращает отсортированный список всех seq из загруженных данных."""
-        all_seq = set()
-        for _, row in self.data.iterrows():
-            for s in row["seq_list"]:
-                all_seq.add(s)
-        return sorted(all_seq)
+        return sorted(set(self.data["seq_list"].explode()))
 
-    def render_visible_range(self):
-        """Оптимизированная отрисовка только видимой области с учетом наложения NACK"""
-
-        if self.data is None:
-            return
-
-        all_seq = self.get_all_seq()
-        if not all_seq:
-            return
-
-        visible_seq = all_seq[self.current_start:self.current_start + self.visible_count]
-        seq_to_index = {seq: i for i, seq in enumerate(visible_seq)}
-
-        # 1. Кешируем seq_info при первой загрузке
+    @profile_detailed
+    def cache_seq_info(self, all_seq):
+        """Кеширует seq_info при первой загрузке."""
         if not self.seq_info:
             self.seq_info = {seq: {"final_state": 1, "events": []} for seq in all_seq}
             normal_df = self.data[self.data["type"] != 3]
@@ -247,17 +247,21 @@ class CSVGraphApp:
                     if seq in self.seq_info:
                         event = row.to_dict()
                         self.seq_info[seq]["events"].append(event)
+                        self._update_final_state(seq, row["type"])
 
-                        # Определяем final_state
-                        event_type = row["type"]
-                        if event_type == 2:
-                            self.seq_info[seq]["final_state"] = 2
-                        elif event_type == -1 and self.seq_info[seq]["final_state"] != 2:
-                            self.seq_info[seq]["final_state"] = -1
-                        elif event_type == 1 and self.seq_info[seq]["final_state"] == 1:
-                            self.seq_info[seq]["final_state"] = 1
+    @profile_time
+    def _update_final_state(self, seq, event_type):
+        """Обновляет final_state для события."""
+        if event_type == 2:
+            self.seq_info[seq]["final_state"] = 2
+        elif event_type == -1 and self.seq_info[seq]["final_state"] != 2:
+            self.seq_info[seq]["final_state"] = -1
+        elif event_type == 1 and self.seq_info[seq]["final_state"] == 1:
+            self.seq_info[seq]["final_state"] = 1
 
-        # 2. Отрисовка нормальных событий
+    @profile_time
+    def draw_normal_events(self, visible_seq, seq_to_index):
+        """Отрисовывает нормальные события."""
         norm_rects, norm_colors = [], []
         self.norm_tooltips = []
 
@@ -276,62 +280,90 @@ class CSVGraphApp:
         self.norm_collection = PatchCollection(norm_rects, facecolors=norm_colors, edgecolors='none', picker=True)
         self.ax.add_collection(self.norm_collection)
 
-        # 3. Отрисовка NACK-событий (полностью, если они хоть частично видны)
+    @profile_time
+    def draw_nack_events(self, seq_to_index):
+        """Отрисовывает NACK-события."""
         nack_df = self.data[self.data["type"] == 3]
-        nack_boxes, nack_tooltips, nack_points = [], [], []
-        lines = []  # Хранит уровни размещения NACK-событий
-
-        def intervals_overlap(a1, b1, a2, b2):
-            """Проверяет, пересекаются ли два отрезка на шкале X"""
-            return not (b1 < a2 or a1 > b2)
+        nack_boxes = []
+        nack_tooltips = []
+        nack_points = []
+        lines = []  # для вычисления вертикального сдвига
 
         rect_height = 0.07
-        line_spacing = 0.003
+        line_spacing = 0.01  # Минимальный зазор между NACK
+        first_line_offset = 0.075  # Смещение для первого уровня
 
         for _, row in nack_df.iterrows():
             seq_list = row["seq_list"]
 
-            # Если хотя бы один seq попадает в visible_seq, рисуем весь NACK
-            visible_in_event = [s for s in seq_list if s in visible_seq]
+            formatted_time = row["timestamp"].strftime('%Y-%m-%d %H:%M:%S')
+            milliseconds = int(row["timestamp"].microsecond / 1000)
+            formatted_time += f":{milliseconds:03d}"
+
+            # Фильтруем только те seq, которые видимы
+            visible_in_event = [s for s in seq_list if s in seq_to_index]
             if not visible_in_event:
                 continue
 
-            # Берем мин/макс из всей строки, а не только visible_seq
-            min_seq, max_seq = min(seq_list), max(seq_list)
-            min_idx, max_idx = seq_to_index.get(min_seq, 0), seq_to_index.get(max_seq, len(visible_seq) - 1)
+            min_seq = min(visible_in_event)
+            max_seq = max(visible_in_event)
+            min_idx = seq_to_index.get(min_seq)
+            max_idx = seq_to_index.get(max_seq)
+            if min_idx is None or max_idx is None:
+                continue
 
+            start_interval = min_idx
+            end_interval = max_idx
+            line_index = None
+
+            # Проверка на пересечение с уже занятыми линиями
+            for i, intervals in enumerate(lines):
+                if all(not intervals_overlap(start_interval, end_interval, a, b) for (a, b) in intervals):
+                    line_index = i
+                    intervals.append((start_interval, end_interval))
+                    break
+
+            if line_index is None:
+                # Если нет свободной линии, создаем новую
+                line_index = len(lines)
+                lines.append([(start_interval, end_interval)])
+
+            # Начальная и конечная позиция для прямоугольника
             x_start = min_idx * (self.square_width + self.gap)
             x_end = max_idx * (self.square_width + self.gap) + self.square_width
             width_rect = x_end - x_start
 
-            # Определяем уровень для NACK, чтобы избежать наложения
-            line_index = None
-            for i, intervals in enumerate(lines):
-                if all(not intervals_overlap(x_start, x_end, a, b) for (a, b) in intervals):
-                    line_index = i
-                    intervals.append((x_start, x_end))
-                    break
-            if line_index is None:
-                line_index = len(lines)
-                lines.append([(x_start, x_end)])
+            # Расположение прямоугольника по вертикали
+            rect_y = 0.5 - first_line_offset - line_index * (rect_height + line_spacing)
 
-            rect_y = 0.3 - line_index * (rect_height + line_spacing)  # Смещаем вниз при наложении
-
+            # Создание прямоугольника для NACK
             box = plt.Rectangle((x_start, rect_y), width_rect, rect_height)
-            box.tooltip = f"NACK: {seq_list}\nTimestamp: {row['timestamp']}"
+            box.tooltip = f"NACK: {visible_in_event}\n Timestamp: {formatted_time}"
             nack_boxes.append(box)
             nack_tooltips.append(box.tooltip)
 
-            for s in seq_list:
-                idx = seq_to_index.get(s, None)
+            # Точки (расположены строго под seq)
+            for s in visible_in_event:
+                idx = seq_to_index.get(s)
                 if idx is None:
                     continue
-                x_center = idx * (self.square_width + self.gap) + self.square_width / 2
-                y_center = rect_y + rect_height / 2  # Центр прямоугольника
+                x_center = idx * (self.square_width + self.gap) + self.square_width / 2  # Центр для каждого seq
+                y_center = rect_y + rect_height / 2
                 nack_points.append((x_center, y_center))
 
+        self._update_nack_collection(nack_boxes, nack_tooltips, nack_points)
+
+    # Функция для проверки перекрытия интервалов
+
+    @profile_time
+    def _update_nack_collection(self, nack_boxes, nack_tooltips, nack_points):
+        """Обновляет коллекцию NACK-событий, корректно перерисовывая точки."""
+
+        # Удаляем старые NACK-боксы
         if self.nack_collection:
             self.nack_collection.remove()
+            self.nack_collection = None
+
         if nack_boxes:
             self.nack_collection = PatchCollection(nack_boxes, facecolors="cyan", alpha=0.7, edgecolor="none",
                                                    picker=True)
@@ -340,15 +372,21 @@ class CSVGraphApp:
         else:
             self.nack_collection = None
 
+        # Удаляем старые NACK-точки
         if self.nack_points_collection:
             self.nack_points_collection.remove()
+            self.nack_points_collection = None
+
+        # Добавляем новые точки
         if nack_points:
-            x, y = zip(*nack_points)
+            x, y = zip(*nack_points) if nack_points else ([], [])
             self.nack_points_collection = self.ax.scatter(x, y, s=25, marker="o", color="red", zorder=3)
         else:
             self.nack_points_collection = None
 
-        # 4. Отрисовка Frame-боксов
+    @profile_time
+    def draw_frame_boxes(self, visible_seq):
+        """Отрисовывает Frame-боксы."""
         frame_boxes, frame_colors, frame_tooltips = [], [], []
         block_size = 10
         for i in range(0, len(visible_seq), block_size):
@@ -373,6 +411,11 @@ class CSVGraphApp:
             self.ax.text(x_start + block_width / 2, 1.2, f"Frame: {block_state}", color="white",
                          fontsize=10, ha="center", va="center", zorder=2)
 
+        self._update_frame_collection(frame_boxes, frame_colors, frame_tooltips)
+
+    @profile_time
+    def _update_frame_collection(self, frame_boxes, frame_colors, frame_tooltips):
+        """Обновляет коллекцию Frame-боксов."""
         if self.frame_collection:
             self.frame_collection.remove()
         if frame_boxes:
@@ -383,12 +426,17 @@ class CSVGraphApp:
         else:
             self.frame_collection = None
 
-        # 5. Обновление осей
+    @profile_time
+    def update_axes(self, visible_seq, lines):
+        """Обновляет оси графика."""
         total_visible = len(visible_seq)
         total_width = total_visible * (self.square_width + self.gap)
 
+        max_nack_level = len(lines)
+        min_y = -max_nack_level * (0.07 + 0.01) - 0.5  # Используем rect_height и line_spacing
+
         self.ax.set_xlim(0, total_width)
-        self.ax.set_ylim(-0.5, 1.5)
+        self.ax.set_ylim(min_y, 1.5)
         self.ax.get_yaxis().set_visible(False)
 
         xticks = [i * (self.square_width + self.gap) + self.square_width / 2 for i in range(total_visible)]
@@ -397,15 +445,45 @@ class CSVGraphApp:
         self.ax.set_xticks(xticks)
         self.ax.set_xticklabels(xlabels, color="white", fontsize=10, rotation=90)
 
-        # 6. Обновление сводной таблицы
-        self.update_summary_table()
+    @profile_time
+    def render_visible_range(self):
+        if self.data is None:
+            return
 
-        # 7. Обновляем график только один раз
+        self.all_seq = self.get_all_seq()
+        if not self.all_seq:
+            return
+        self.setup_slider()
+        visible_seq = self.all_seq[self.current_start:self.current_start + self.visible_count]
+        seq_to_index = {seq: i for i, seq in enumerate(visible_seq)}
+
+        # 1. Кеширование seq_info
+        self.cache_seq_info(self.all_seq)
+
+        # 2. Отрисовка нормальных событий
+        self.draw_normal_events(visible_seq, seq_to_index)
+
+        # 3. Отрисовка NACK-событий
+        self.draw_nack_events(seq_to_index)
+
+        # 4. Отрисовка Frame-боксов
+        self.draw_frame_boxes(visible_seq)
+
+        # 5. Обновление осей
+        self.update_axes(visible_seq, self.nack_lines)
+
+        # 6. Обновление сводной таблицы
+        if not self.isLoadTable:
+            self.update_summary_table()
+            self.isLoadTable = True
+
+        # 7. Обновление графика
         self.canvas.draw_idle()
 
+    @profile_time
     def setup_slider(self):
         """Создаёт слайдер для управления диапазоном отображаемых seq."""
-        all_seq = self.get_all_seq()
+        all_seq = self.all_seq
         if not all_seq:
             return
         min_seq, max_seq = min(all_seq), max(all_seq)
@@ -417,11 +495,13 @@ class CSVGraphApp:
         if not self.slider.winfo_ismapped():
             self.slider.pack(side=tk.LEFT, expand=True, fill=tk.X, padx=5)
 
+    @profile_time
     def update_visible_range(self, new_start):
         """Обновляет отображаемый диапазон, устанавливая новый current_start и перерисовывая видимую область."""
         self.current_start = new_start
         self.render_visible_range()
 
+    @profile_time
     def center_half_screen(self):
         """
          /**
@@ -441,6 +521,7 @@ class CSVGraphApp:
         geometry_str = f"{width}x{height}+{x}+{y}"
         self.root.geometry(geometry_str)
 
+    @profile_time
     def create_checkboxes(self):
         """
          /**
@@ -466,6 +547,7 @@ class CSVGraphApp:
         for var in self.check_vars.values():
             var.trace_add("write", lambda name, index, mode: self.update_visible_tooltip())
 
+    @profile_detailed
     def update_visible_tooltip(self):
         """
         Если окно tooltip открыто, обновляет его текст с учётом последних настроек.
@@ -483,6 +565,7 @@ class CSVGraphApp:
             self.remove_tooltip()
 
     @staticmethod
+    @profile_time
     def parse_seq(row):
         """
         Парсит значение столбца 'seq'. Если row["type"] == 3, данные могут быть:
@@ -563,6 +646,7 @@ class CSVGraphApp:
                 print(f"[DEBUG] Ошибка преобразования 'seq' {seq_val} в int: {e}")
                 return []
 
+    @profile_time
     def clear_graph(self):
         """Очищает график и все связанные коллекции перед построением нового графика."""
         self.ax.clear()
@@ -578,6 +662,7 @@ class CSVGraphApp:
         # Обновляем canvas, чтобы изменения отобразились
         self.canvas.draw()
 
+    @profile_time
     def load_csv(self):
         """
          /**
@@ -610,17 +695,17 @@ class CSVGraphApp:
             # Очищаем график перед построением нового
             self.clear_graph()
 
-            self.setup_slider()
             self.render_visible_range()
         except Exception as e:
             self.file_label.config(text=f"Ошибка: {e}")
 
+    @profile_time
     def update_summary_table(self):
         """
         Вычисляет и обновляет сводную таблицу подсчёта для всех seq,
         присутствующих в загруженных данных.
         """
-        all_seq = self.get_all_seq()  # Получаем полный список seq
+        all_seq = self.all_seq
         total_seq = len(all_seq)
         total_received = sum(1 for info in self.seq_info.values() if info["final_state"] in [1, 2])
         total_lost = sum(1 for info in self.seq_info.values() if info["final_state"] == -1)
@@ -639,6 +724,7 @@ class CSVGraphApp:
         else:
             self.summary_label.config(text=summary_text)
 
+    @profile_time
     def get_tooltip_text(self, seq):
         """
         Возвращает текст tooltip для конкретного seq.
@@ -684,6 +770,7 @@ class CSVGraphApp:
 
         return "\n".join(tooltip_parts)
 
+    @profile_time
     def on_hover(self, event):
         """
         Обрабатывает наведение курсора на объекты графика.
@@ -738,6 +825,7 @@ class CSVGraphApp:
 
         self.canvas.draw_idle()
 
+    @profile_time
     def _find_tooltip(self, event, apply_check_vars=True):
         """
         Вспомогательный метод, который по событию (event) проверяет все три коллекции:
@@ -771,6 +859,7 @@ class CSVGraphApp:
 
         return None, None, None
 
+    @profile_time
     def _filter_tooltip(self, tooltip_text):
         """
         Фильтрует содержимое tooltip согласно активным чекбоксам.
@@ -794,6 +883,7 @@ class CSVGraphApp:
 
         return "\n".join(filtered_lines) if filtered_lines else None
 
+    @profile_time
     def show_tooltip(self, text):
         """
         Отображает tooltip рядом с курсором.
@@ -818,9 +908,10 @@ class CSVGraphApp:
                                           bg="#333333", fg="white", relief=tk.SOLID)
             self.tooltip_label.pack(padx=5, pady=5)
 
+    @profile_time
     def remove_tooltip(self):
         """
-        Вместо уничтожения, скрываем окно tooltip (withdraw),
+        Скрываем окно tooltip (withdraw),
         чтобы потом можно было быстро обновлять его содержимое.
         """
         if self.tooltip_window:
