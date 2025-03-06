@@ -347,13 +347,14 @@ class CSVGraphApp:
                 idx = seq_to_index.get(s)
                 if idx is None:
                     continue
-                x_center = idx * (self.square_width + self.gap) + self.square_width / 2  # Центр для каждого seq
+                x_center = idx * (self.square_width + self.gap) + self.square_width / 2
                 y_center = rect_y + rect_height / 2
                 nack_points.append((x_center, y_center))
 
+        # Обновляем уровни NACK, чтобы update_axes получил актуальное значение
+        self.nack_lines = lines
+        # Обновляем коллекцию NACK (боксы и точки)
         self._update_nack_collection(nack_boxes, nack_tooltips, nack_points)
-
-    # Функция для проверки перекрытия интервалов
 
     @profile_time
     def _update_nack_collection(self, nack_boxes, nack_tooltips, nack_points):
