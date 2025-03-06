@@ -444,12 +444,24 @@ class CSVGraphApp:
 
     @profile_time
     def update_axes(self, visible_seq, lines):
-        """Обновляет оси графика."""
+        """Обновляет оси графика с динамическим нижним пределом для nack-событий."""
         total_visible = len(visible_seq)
         total_width = total_visible * (self.square_width + self.gap)
 
-        max_nack_level = len(lines)
-        min_y = -max_nack_level * (0.07 + 0.01) - 0.5  # Используем rect_height и line_spacing
+        # Если nack-события есть, вычисляем нижнюю границу оси Y
+        if len(lines) > 0:
+            max_nack_level = len(lines)
+            lowest_line_index = max_nack_level - 1
+            rect_height = 0.07
+            line_spacing = 0.01
+            first_line_offset = 0.075
+            # Координата y для самой верхней точки нижней nack-линии (rect_y)
+            lowest_y = 0.5 - first_line_offset - lowest_line_index * (rect_height + line_spacing)
+            margin = 0.05  # Дополнительный запас
+            min_y = lowest_y - margin
+        else:
+            # Если нет nack, нижняя граница чуть ниже нормальных объектов
+            min_y = 0.5 - 0.05
 
         self.ax.set_xlim(0, total_width)
         self.ax.set_ylim(min_y, 1.5)
