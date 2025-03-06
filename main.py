@@ -11,6 +11,7 @@ from matplotlib.collections import PatchCollection
 
 from detailProfile import profile_detailed
 from showProfile import profile_time
+from collections import namedtuple
 
 # Используем TkAgg и темную тему
 matplotlib.use("TkAgg")
@@ -144,7 +145,10 @@ class CSVGraphApp:
         self.next_button.pack(side=tk.RIGHT, padx=5)
         self.slider = tk.Scale(self.nav_frame, from_=0, to=0, orient=tk.HORIZONTAL,
                                command=self.slider_update, length=500,
-                               bg="#2E2E2E", fg="white", highlightthickness=0)
+                               bg="#2E2E2E", fg="white", highlightthickness=0, showvalue=False)
+        self.slider.pack(side=tk.LEFT, expand=True, fill=tk.X, padx=5)
+        self.slider_value_label = tk.Label(self.nav_frame, text="", bg="#2E2E2E", fg="white")
+        self.slider_value_label.pack(side=tk.LEFT, padx=5)
 
         # Фрейм для сводной таблицы
         self.summary_frame = tk.Frame(self.main_frame, bg="#2E2E2E", height=50)
@@ -212,6 +216,9 @@ class CSVGraphApp:
     def slider_update(self, val):
         self.current_start = int(val)
         self.render_visible_range()
+        # Обновляем метку, показывающую реальный seq первого norm-объекта
+        if self.all_seq:
+            self.slider_value_label.config(text=f"Seq: {self.all_seq[self.current_start]}")
 
     @profile_time
     def move_left(self):
@@ -237,17 +244,25 @@ class CSVGraphApp:
 
     @profile_detailed
     def cache_seq_info(self, all_seq):
-        """Кеширует seq_info при первой загрузке."""
-        if not self.seq_info:
-            self.seq_info = {seq: {"final_state": 1, "events": []} for seq in all_seq}
-            normal_df = self.data[self.data["type"] != 3]
+        """Кеширует seq_info при первой загрузке. Оптимизировано для скорости."""
+        if self.seq_info:
+            return  # Уже закешировано, ничего не делаем
 
-            for _, row in normal_df.iterrows():
-                for seq in row["seq_list"]:
-                    if seq in self.seq_info:
-                        event = row.to_dict()
-                        self.seq_info[seq]["events"].append(event)
-                        self._update_final_state(seq, row["type"])
+        self.seq_info = {seq: {"final_state": 1, "events": []} for seq in all_seq}
+        normal_df = self.data[self.data["type"] != 3]
+
+        # Используем itertuples (быстрее, чем iterrows)
+        for row in normal_df.itertuples(index=False, name=None):
+            timestamp, seq_list, event_type, count = row[0], row[9], row[2], row[10]
+
+            for seq in seq_list:
+                if seq in self.seq_info:
+                    self.seq_info[seq]["events"].append({
+                        "timestamp": timestamp,
+                        "type": event_type,
+                        "count": count
+                    })
+                    self._update_final_state(seq, event_type)
 
     @profile_time
     def _update_final_state(self, seq, event_type):
@@ -483,16 +498,15 @@ class CSVGraphApp:
 
     @profile_time
     def setup_slider(self):
-        """Создаёт слайдер для управления диапазоном отображаемых seq."""
-        all_seq = self.all_seq
-        if not all_seq:
-            return
-        min_seq, max_seq = min(all_seq), max(all_seq)
+        """Создаёт слайдер, который работает по индексам, а не по значениям seq."""
+        if not self.all_seq:
+            return  # Если данных нет, ничего не делаем
 
-        # Обновляем границы слайдера
-        self.slider.config(from_=min_seq, to=max_seq - self.visible_count)
-
-        # Если слайдер еще не добавлен на экран, делаем это
+        slider_from = 0
+        slider_to = max(0, len(self.all_seq) - self.visible_count)
+        self.slider.config(from_=slider_from, to=slider_to, resolution=1)
+        self.slider.set(self.current_start)
+        self.slider_value_label.config(text=f"Seq: {self.all_seq[self.current_start]}")
         if not self.slider.winfo_ismapped():
             self.slider.pack(side=tk.LEFT, expand=True, fill=tk.X, padx=5)
 
@@ -647,7 +661,7 @@ class CSVGraphApp:
                 print(f"[DEBUG] Ошибка преобразования 'seq' {seq_val} в int: {e}")
                 return []
 
-    @profile_time
+    @profile_detailed
     def clear_graph(self):
         """Очищает график и все связанные коллекции перед построением нового графика."""
         self.ax.clear()
@@ -695,7 +709,6 @@ class CSVGraphApp:
                 self.main_frame.pack(fill=tk.BOTH, expand=True)
             # Очищаем график перед построением нового
             self.clear_graph()
-
             self.render_visible_range()
         except Exception as e:
             self.file_label.config(text=f"Ошибка: {e}")
@@ -779,6 +792,11 @@ class CSVGraphApp:
         выделяет его (изменяя контур) и показывает соответствующий tooltip.
         При отсутствии объекта сбрасывает tooltip и восстанавливает исходные настройки.
         """
+        if not (self.ax.get_window_extent().contains(event.x, event.y)):
+            return
+
+        if not any([self.norm_collection, self.nack_collection, self.frame_collection]):
+            return
 
         self.last_event = event  # Сохраняем событие для update_visible_tooltip
 
