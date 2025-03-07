@@ -6,7 +6,7 @@ import pandas as pd
 import matplotlib
 import matplotlib.pyplot as plt
 import ast
-from matplotlib.backend_bases import MouseEvent
+from typing import Any
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg, NavigationToolbar2Tk
 from matplotlib.collections import PatchCollection
 
@@ -171,7 +171,7 @@ class CSVGraphApp:
         self.tooltip_label.pack(padx=5, pady=5)
 
         # Выделение при hover
-        self._facecolors = None
+        self.face_colors = None
         self.tooltip_window = None
         self.tooltip_label = None
         self.last_patch = None
@@ -187,7 +187,7 @@ class CSVGraphApp:
         self.frame_tooltips = []
         self.seq_info: dict = {}  # агрегированная информация по seq
         self.generated_color = 'lime'
-        self.ungenerated_color = 'orangered'
+        self.un_generated_color = 'orangered'
         self.last_event = None
         self.all_seq = None
         self.isLoadTable = False
@@ -425,7 +425,7 @@ class CSVGraphApp:
             for s in block:
                 if self.seq_info.get(s, {}).get("final_state") == -1:
                     block_state = "UnGenerated"
-                    block_color = self.ungenerated_color
+                    block_color = self.un_generated_color
                     break
 
             x_start = i * (self.square_width + self.gap)
@@ -479,11 +479,11 @@ class CSVGraphApp:
         self.ax.set_ylim(min_y, 1.5)
         self.ax.get_yaxis().set_visible(False)
 
-        xticks = [i * (self.square_width + self.gap) + self.square_width / 2 for i in range(total_visible)]
-        xlabels = [str(seq) for seq in visible_seq]
+        x_ticks = [i * (self.square_width + self.gap) + self.square_width / 2 for i in range(total_visible)]
+        x_labels = [str(seq) for seq in visible_seq]
 
-        self.ax.set_xticks(xticks)
-        self.ax.set_xticklabels(xlabels, color="white", fontsize=10, rotation=90)
+        self.ax.set_xticks(x_ticks)
+        self.ax.set_xticklabels(x_labels, color="white", fontsize=10, rotation=90)
 
     @profile_time
     def render_visible_range(self):
@@ -788,7 +788,7 @@ class CSVGraphApp:
         return "\n".join(tooltip_parts)
 
     @profile_detailed
-    def on_hover(self, event: MouseEvent):
+    def on_hover(self, event: Any):
         """
         Оптимизированный обработчик наведения курсора:
         - Ограничение частоты вызовов (троттлинг)
@@ -831,23 +831,23 @@ class CSVGraphApp:
         # 7️⃣ Если нашли объект — выделяем его
         if tooltip_text is not None and current_coll is not None:
             try:
-                if current_coll not in self._facecolors:
+                if current_coll not in self.face_colors:
                     orig_fc = current_coll.get_edgecolors().copy() if current_coll.get_edgecolors() is not None else None
                     orig_lw = current_coll.get_linewidths().copy() if current_coll.get_linewidths() is not None else None
-                    self._facecolors[current_coll] = (orig_fc, orig_lw)
+                    self.face_colors[current_coll] = (orig_fc, orig_lw)
 
-                new_edgecolors = current_coll.get_edgecolors().copy() if current_coll.get_edgecolors() is not None else None
-                new_linewidths = current_coll.get_linewidths().copy() if current_coll.get_linewidths() is not None else None
+                new_edge_colors = current_coll.get_edgecolors().copy() if current_coll.get_edgecolors() is not None else None
+                new_line_widths = current_coll.get_linewidths().copy() if current_coll.get_linewidths() is not None else None
 
-                if new_edgecolors is not None and new_edgecolors.size > highlight_index:
-                    new_edgecolors[highlight_index] = (1, 1, 1, 1)  # Белый контур
-                if new_linewidths is not None and new_linewidths.size > highlight_index:
-                    new_linewidths[highlight_index] = 3
+                if new_edge_colors is not None and new_edge_colors.size > highlight_index:
+                    new_edge_colors[highlight_index] = (1, 1, 1, 1)  # Белый контур
+                if new_line_widths is not None and new_line_widths.size > highlight_index:
+                    new_line_widths[highlight_index] = 3
 
-                if new_edgecolors is not None:
-                    current_coll.set_edgecolors(new_edgecolors)
-                if new_linewidths is not None:
-                    current_coll.set_linewidths(new_linewidths)
+                if new_edge_colors is not None:
+                    current_coll.set_edgecolors(new_edge_colors)
+                if new_line_widths is not None:
+                    current_coll.set_linewidths(new_line_widths)
 
             except Exception as e:
                 print(f"[ERROR] Ошибка при выделении объекта: {e}")
@@ -857,10 +857,10 @@ class CSVGraphApp:
         # 8️⃣ Если объект не найден — сбрасываем выделение
         else:
             self.remove_tooltip()
-            if self._facecolors is None:
-                self._facecolors = {}
+            if self.face_colors is None:
+                self.face_colors = {}
 
-            for coll, (orig_fc, orig_lw) in self._facecolors.items():
+            for coll, (orig_fc, orig_lw) in self.face_colors.items():
                 try:
                     if orig_fc is not None:
                         coll.set_edgecolors(orig_fc)
@@ -869,7 +869,7 @@ class CSVGraphApp:
                 except Exception as e:
                     print(f"[ERROR] Ошибка при сбросе выделения: {e}")
 
-            self._facecolors.clear()
+            self.face_colors.clear()
             self.highlighted_object = None  # Сбрасываем выделенный объект
 
         self.canvas.draw_idle()
@@ -894,26 +894,32 @@ class CSVGraphApp:
             (self.frame_collection, self.frame_tooltips)
         ]
 
-        # Быстрое нахождение первого совпадения
-        result = next(
-            (
-                (info["ind"][0],
-                 self._filter_tooltip(tooltips[info["ind"][0]]) if apply_check_vars else tooltips[info["ind"][0]],
-                 collection)
-                for collection, tooltips in collections
-                if collection is not None and (contains_info := collection.contains(event)) and contains_info[0] and
-                   (info := contains_info[1]) is not None and "ind" in info and len(info["ind"]) > 0
-            ),
-            (None, None, None)
-        )
-        return result
+        # Перебираем коллекции вручную, чтобы избежать ошибки с присвоением
+        for collection, tooltips in collections:
+            if collection is None:
+                continue
+
+            contains_info = collection.contains(event)  # Вызываем 1 раз
+            if not contains_info[0]:  # Если курсор не попал в объект — пропускаем
+                continue
+
+            info = contains_info[1]  # Вытаскиваем вторую часть ответа
+            if info is None or "ind" not in info or len(info["ind"]) == 0:
+                continue
+
+            idx = info["ind"][0]
+            tooltip_text = self._filter_tooltip(tooltips[idx]) if apply_check_vars else tooltips[idx]
+
+            return idx, tooltip_text, collection  # Нашли объект — возвращаем
+
+        return None, None, None  # Если ничего не нашли
 
     def _filter_tooltip(self, tooltip_text):
         """
         Фильтрует содержимое tooltip согласно активным чекбоксам.
 
-        :param tooltip_text: оригинальный текст tooltip.
-        :return: отфильтрованный текст.
+        :param tooltip_text: Оригинальный текст tooltip.
+        :return: Отфильтрованный текст.
         """
         lines = tooltip_text.split("\n")
         filtered_lines = []
@@ -963,7 +969,7 @@ class CSVGraphApp:
         if self.tooltip_window:
             self.tooltip_window.withdraw()
 
-    def on_leave(self, event=None):
+    def on_leave(self, _=None):
         """
         Скрывает tooltip, если мышь вышла за пределы графика.
         """
