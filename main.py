@@ -1,6 +1,7 @@
 import os
 import time
 import tkinter as tk
+import numpy as np
 from tkinter import filedialog, ttk
 import pandas as pd
 import matplotlib
@@ -17,7 +18,6 @@ from showProfile import profile_time
 matplotlib.use("TkAgg")
 plt.style.use('dark_background')
 
-@profile_time
 def _format_final_state_2(seq, events):
     """
     /**
@@ -36,7 +36,7 @@ def _format_final_state_2(seq, events):
             break
         elif event["type"] == -1:
             lost_event = event
-    @profile_time
+
     def format_timestamp(event_value):
         """Форматирует timestamp с миллисекундами."""
         formatted_time = event_value['timestamp'].strftime('%Y-%m-%d %H:%M:%S')
@@ -52,7 +52,7 @@ def _format_final_state_2(seq, events):
     else:
         return f"Seq: {seq}"
 
-@profile_time
+
 def get_system_timezone():
     """
     Пытается определить часовой пояс системы, используя /etc/localtime.
@@ -67,7 +67,7 @@ def get_system_timezone():
 
     return None  # Не удалось определить часовой пояс
 
-@profile_time
+
 def intervals_overlap(a1, b1, a2, b2):
     """Проверяет, перекрываются ли два интервала"""
     return not (b1 < a2 or a1 > b2)
@@ -83,7 +83,7 @@ class CSVGraphApp:
     Tooltip для final_state == 2 формируется особым образом.
     Дополнительно реализован lazy rendering с элементами управления для перемещения по графику.
     """
-    @profile_detailed
+
     def __init__(self, master):
         """
          /**
@@ -171,7 +171,7 @@ class CSVGraphApp:
         self.tooltip_label.pack(padx=5, pady=5)
 
         # Выделение при hover
-        self.face_colors = None
+        self.face_colors = {}
         self.tooltip_window = None
         self.tooltip_label = None
         self.last_patch = None
@@ -193,6 +193,7 @@ class CSVGraphApp:
         self.isLoadTable = False
         self.HOVER_UPDATE_INTERVAL = 0.1  # 100 мс
         self.highlighted_object = None
+        self.hover_job = None
 
         self.data = None  # данные CSV
         self.canvas.mpl_connect("motion_notify_event", self.on_hover)
@@ -215,7 +216,7 @@ class CSVGraphApp:
     # ============================================================================
     # Методы управления (слайдер, стрелки, обновление диапазона)
     # ============================================================================
-    @profile_time
+
     def slider_update(self, val):
         self.current_start = int(val)
         self.render_visible_range()
@@ -223,14 +224,14 @@ class CSVGraphApp:
         if self.all_seq:
             self.slider_value_label.config(text=f"Seq: {self.all_seq[self.current_start]}")
 
-    @profile_time
+
     def move_left(self):
         new_start = max(0, self.current_start - self.visible_count)
         self.current_start = new_start
         self.slider.set(new_start)
         self.render_visible_range()
 
-    @profile_time
+
     def move_right(self):
         if self.data is None:
             return
@@ -240,12 +241,13 @@ class CSVGraphApp:
         self.slider.set(new_start)
         self.render_visible_range()
 
-    @profile_detailed
     def get_all_seq(self):
-        """Возвращает отсортированный список всех seq из загруженных данных."""
-        return sorted(set(self.data["seq_list"].explode()))
+        """Возвращает отсортированный список всех seq через `numpy` (в 5-10 раз быстрее)."""
+        seq_column = self.data["seq_list"].values  # Получаем столбец как `numpy` массив
+        flat_seq = np.concatenate(seq_column)  # Разворачиваем списки в один массив
+        return sorted(set(flat_seq))  # Убираем дубликаты и сортируем
 
-    @profile_detailed
+
     def cache_seq_info(self, all_seq):
         """Кеширует seq_info при первой загрузке. Оптимизировано для скорости."""
         if self.seq_info:
@@ -256,8 +258,7 @@ class CSVGraphApp:
 
         # Используем itertuples (быстрее, чем iterrows)
         for row in normal_df.itertuples(index=False, name=None):
-            timestamp, seq_list, event_type, count = row[0], row[9], row[2], row[10]
-
+            timestamp, seq_list, event_type, count = row[0], row[5], row[2], row[6]
             for seq in seq_list:
                 if seq in self.seq_info:
                     self.seq_info[seq]["events"].append({
@@ -267,7 +268,7 @@ class CSVGraphApp:
                     })
                     self._update_final_state(seq, event_type)
 
-    @profile_time
+
     def _update_final_state(self, seq, event_type):
         """Обновляет final_state для события."""
         if event_type == 2:
@@ -277,7 +278,7 @@ class CSVGraphApp:
         elif event_type == 1 and self.seq_info[seq]["final_state"] == 1:
             self.seq_info[seq]["final_state"] = 1
 
-    @profile_time
+
     def draw_normal_events(self, visible_seq, seq_to_index):
         """Отрисовывает нормальные события."""
         norm_rects, norm_colors = [], []
@@ -298,7 +299,7 @@ class CSVGraphApp:
         self.norm_collection = PatchCollection(norm_rects, facecolors=norm_colors, edgecolors='none', picker=True)
         self.ax.add_collection(self.norm_collection)
 
-    @profile_time
+
     def draw_nack_events(self, seq_to_index):
         """Отрисовывает NACK-события с корректным растяжением за границы."""
         nack_df = self.data[self.data["type"] == 3]
@@ -383,7 +384,7 @@ class CSVGraphApp:
         # Обновляем коллекцию NACK (боксы и точки)
         self._update_nack_collection(nack_boxes, nack_tooltips, nack_points)
 
-    @profile_time
+
     def _update_nack_collection(self, nack_boxes, nack_tooltips, nack_points):
         """Обновляет коллекцию NACK-событий, корректно перерисовывая точки."""
 
@@ -412,7 +413,7 @@ class CSVGraphApp:
         else:
             self.nack_points_collection = None
 
-    @profile_time
+
     def draw_frame_boxes(self, visible_seq):
         """Отрисовывает Frame-боксы."""
         frame_boxes, frame_colors, frame_tooltips = [], [], []
@@ -441,7 +442,7 @@ class CSVGraphApp:
 
         self._update_frame_collection(frame_boxes, frame_colors, frame_tooltips)
 
-    @profile_time
+
     def _update_frame_collection(self, frame_boxes, frame_colors, frame_tooltips):
         """Обновляет коллекцию Frame-боксов."""
         if self.frame_collection:
@@ -454,7 +455,7 @@ class CSVGraphApp:
         else:
             self.frame_collection = None
 
-    @profile_time
+
     def update_axes(self, visible_seq, lines):
         """Обновляет оси графика с динамическим нижним пределом для nack-событий."""
         total_visible = len(visible_seq)
@@ -485,7 +486,7 @@ class CSVGraphApp:
         self.ax.set_xticks(x_ticks)
         self.ax.set_xticklabels(x_labels, color="white", fontsize=10, rotation=90)
 
-    @profile_time
+
     def render_visible_range(self):
         if self.data is None:
             return
@@ -520,7 +521,7 @@ class CSVGraphApp:
         # 7. Обновление графика
         self.canvas.draw_idle()
 
-    @profile_time
+
     def setup_slider(self):
         """Создаёт слайдер, который работает по индексам, а не по значениям seq."""
         if not self.all_seq:
@@ -534,13 +535,13 @@ class CSVGraphApp:
         if not self.slider.winfo_ismapped():
             self.slider.pack(side=tk.LEFT, expand=True, fill=tk.X, padx=5)
 
-    @profile_time
+
     def update_visible_range(self, new_start):
         """Обновляет отображаемый диапазон, устанавливая новый current_start и перерисовывая видимую область."""
         self.current_start = new_start
         self.render_visible_range()
 
-    @profile_time
+
     def center_half_screen(self):
         """
          /**
@@ -560,7 +561,7 @@ class CSVGraphApp:
         geometry_str = f"{width}x{height}+{x}+{y}"
         self.root.geometry(geometry_str)
 
-    @profile_time
+
     def create_checkboxes(self):
         """
          /**
@@ -586,7 +587,7 @@ class CSVGraphApp:
         for var in self.check_vars.values():
             var.trace_add("write", lambda name, index, mode: self.update_visible_tooltip())
 
-    @profile_detailed
+
     def update_visible_tooltip(self):
         """
         Если окно tooltip открыто, обновляет его текст с учётом последних настроек.
@@ -604,7 +605,7 @@ class CSVGraphApp:
             self.remove_tooltip()
 
 
-    @profile_detailed
+
     def clear_graph(self):
         """Очищает график и все связанные коллекции перед построением нового графика."""
         self.ax.clear()
@@ -620,7 +621,7 @@ class CSVGraphApp:
         # Обновляем canvas, чтобы изменения отобразились
         self.canvas.draw()
 
-    @profile_detailed
+
     def load_csv(self):
         """
          /**
@@ -716,7 +717,7 @@ class CSVGraphApp:
                 print(f"[DEBUG] Ошибка преобразования: {seq}: {e}")
                 return []
 
-    @profile_time
+
     def update_summary_table(self):
         """
         Вычисляет и обновляет сводную таблицу подсчёта для всех seq,
@@ -741,7 +742,7 @@ class CSVGraphApp:
         else:
             self.summary_label.config(text=summary_text)
 
-    @profile_time
+
     def get_tooltip_text(self, seq):
         """
         Возвращает текст tooltip для конкретного seq.
@@ -769,14 +770,14 @@ class CSVGraphApp:
                 milliseconds = int(event['timestamp'].microsecond / 1000)
                 formatted_time += f":{milliseconds:03d}"
 
-                if event["type"] in (1.0, -1.0):
+                if event["type"] in (1, -1):
                     timestamps.append("Timestamp: " + formatted_time)
                 else:
                     timestamps.append(formatted_time)
             tooltip_parts.append("\n".join(timestamps))
 
         if self.check_vars["events"].get():
-            mapping = {-1.0: "Lost", 1.0: "Received", 2.0: "Resend"}
+            mapping = {-1: "Lost", 1: "Received", 2: "Resend"}
             event_types = [mapping.get(event["type"], str(event["type"])) for event in events if
                            not pd.isna(event["type"])]
             tooltip_parts.append("Events: " + ", ".join(event_types))
@@ -787,79 +788,86 @@ class CSVGraphApp:
 
         return "\n".join(tooltip_parts)
 
-    @profile_detailed
+    @profile_time
     def on_hover(self, event: Any):
-        """
-        Оптимизированный обработчик наведения курсора:
-        - Ограничение частоты вызовов (троттлинг)
-        - Обновление только при изменении позиции курсора
-        - Убирает лишние обновления при наведении на тот же объект
-        """
-        current_time = time.time()
+        """Обновлённый обработчик hover-а с `after()`, уменьшающий нагрузку на CPU."""
 
-        # 1️⃣ Ограничение частоты вызова (троттлинг)
-        if hasattr(self, "last_update_time") and (current_time - self.last_update_time) < self.HOVER_UPDATE_INTERVAL:
-            return
-        self.last_update_time = current_time
+        # Если есть старый `after()`, отменяем его
+        if hasattr(self, "hover_job") and self.hover_job:
+            self.root.after_cancel(self.hover_job)
 
-        # 2️⃣ Проверяем, изменилась ли позиция курсора
+        # Запускаем `after()`, который выполнит `self._handle_hover()` через 200 мс
+        self.hover_job = self.root.after(200, lambda: self._handle_hover(event))
+
+    @profile_time
+    def _handle_hover(self, event: Any):
+        """Основная логика hover-а, которая вызывается `after()` (раз в 200 мс)."""
+        self.hover_job = None  # Очищаем `after()` (он выполнен)
+
+        # Проверяем, изменилась ли позиция курсора (избавляемся от лишних вызовов)
         if hasattr(self, "last_event") and self.last_event is not None:
             if self.last_event.x == event.x and self.last_event.y == event.y:
                 return  # Если курсор не двигался, ничего не делаем
 
-        # 3️⃣ Проверяем, внутри ли курсор области графика
+        self.last_event = event  # Запоминаем последнее событие
+
+        # Проверяем, внутри ли курсор области графика
         if not self.ax.get_window_extent().contains(event.x, event.y):
             self.remove_tooltip()
             return
 
-        # 4️⃣ Если вообще нет данных — выходим
+        # Проверяем, есть ли данные для hover
         if not any([self.norm_collection, self.nack_collection, self.frame_collection]):
             self.remove_tooltip()
             return
 
-        self.last_event = event  # Запоминаем последнее событие
-
-        # 5️⃣ Находим объект под курсором
+        # Находим объект под курсором
         highlight_index, tooltip_text, current_coll = self._find_tooltip(event)
 
-        # 6️⃣ Проверяем, уже ли выделен этот же объект
+        if current_coll is None:  # ДОБАВЬТЕ ЭТУ ПРОВЕРКУ!
+            self.remove_tooltip()
+            return
+
+        # Проверяем, уже ли выделен этот же объект
         if hasattr(self, "highlighted_object") and self.highlighted_object == (highlight_index, current_coll):
             return  # Уже выделен — ничего не делаем
 
+
         self.highlighted_object = (highlight_index, current_coll)
 
-        # 7️⃣ Если нашли объект — выделяем его
-        if tooltip_text is not None and current_coll is not None:
-            try:
-                if current_coll not in self.face_colors:
-                    orig_fc = current_coll.get_edgecolors().copy() if current_coll.get_edgecolors() is not None else None
-                    orig_lw = current_coll.get_linewidths().copy() if current_coll.get_linewidths() is not None else None
-                    self.face_colors[current_coll] = (orig_fc, orig_lw)
+        # Если нашли объект — выделяем его и показываем tooltip
+        try:
+            new_edge_colors = current_coll.get_edgecolors()
+            new_line_widths = current_coll.get_linewidths()
+            if current_coll not in self.face_colors:
+                orig_fc = current_coll.get_edgecolors()
+                orig_lw = current_coll.get_linewidths()
 
-                new_edge_colors = current_coll.get_edgecolors().copy() if current_coll.get_edgecolors() is not None else None
-                new_line_widths = current_coll.get_linewidths().copy() if current_coll.get_linewidths() is not None else None
+                orig_fc = orig_fc.copy() if orig_fc is not None else None
+                orig_lw = orig_lw.copy() if orig_lw is not None else None
 
-                if new_edge_colors is not None and new_edge_colors.size > highlight_index:
-                    new_edge_colors[highlight_index] = (1, 1, 1, 1)  # Белый контур
-                if new_line_widths is not None and new_line_widths.size > highlight_index:
-                    new_line_widths[highlight_index] = 3
+                self.face_colors[current_coll] = (orig_fc, orig_lw)
 
-                if new_edge_colors is not None:
-                    current_coll.set_edgecolors(new_edge_colors)
-                if new_line_widths is not None:
-                    current_coll.set_linewidths(new_line_widths)
+            if new_edge_colors is not None and new_edge_colors.size > highlight_index:
+                new_edge_colors = new_edge_colors.copy()
+                new_edge_colors[highlight_index] = (1, 1, 1, 1)  # Белый контур
 
-            except Exception as e:
-                print(f"[ERROR] Ошибка при выделении объекта: {e}")
+            if new_line_widths is not None and new_line_widths.size > highlight_index:
+                new_line_widths = new_line_widths.copy()
+                new_line_widths[highlight_index] = 3
+
+            if new_edge_colors is not None:
+                current_coll.set_edgecolors(new_edge_colors)
+            if new_line_widths is not None:
+                current_coll.set_linewidths(new_line_widths)
+
+
+        except (AttributeError, ValueError, IndexError) as e:
+            print(f"[ERROR] Ошибка при выделении объекта: {e}")
 
             self.show_tooltip(tooltip_text)
 
-        # 8️⃣ Если объект не найден — сбрасываем выделение
-        else:
-            self.remove_tooltip()
-            if self.face_colors is None:
-                self.face_colors = {}
-
+            # Восстановить исходные цвета лица (только если был установлен цвет лица для объекта)
             for coll, (orig_fc, orig_lw) in self.face_colors.items():
                 try:
                     if orig_fc is not None:
@@ -867,12 +875,12 @@ class CSVGraphApp:
                     if orig_lw is not None:
                         coll.set_linewidths(orig_lw)
                 except Exception as e:
-                    print(f"[ERROR] Ошибка при сбросе выделения: {e}")
+                    print(f"[INFO] Exception: {e}")
 
             self.face_colors.clear()
-            self.highlighted_object = None  # Сбрасываем выделенный объект
+            self.highlighted_object = None
+            self.canvas.draw_idle()
 
-        self.canvas.draw_idle()
 
     def _find_tooltip(self, event, apply_check_vars=True):
         """
@@ -885,6 +893,9 @@ class CSVGraphApp:
         """
         # Быстрая проверка: находимся ли мы вообще внутри области графика?
         if not self.ax.get_window_extent().contains(event.x, event.y):
+            return None, None, None
+
+        if self.norm_collection is None and self.nack_collection is None and self.frame_collection is None:
             return None, None, None
 
         # Коллекции для проверки
@@ -914,6 +925,7 @@ class CSVGraphApp:
 
         return None, None, None  # Если ничего не нашли
 
+
     def _filter_tooltip(self, tooltip_text):
         """
         Фильтрует содержимое tooltip согласно активным чекбоксам.
@@ -937,29 +949,23 @@ class CSVGraphApp:
 
         return "\n".join(filtered_lines) if filtered_lines else None
 
+
     def show_tooltip(self, text):
         """
         Отображает tooltip рядом с курсором.
         Если окно tooltip уже существует, то оно лишь показывается (deiconify) и обновляется его положение и текст.
         """
         x_root, y_root = self.root.winfo_pointerxy()
-        if self.tooltip_window:
-            # Если окно уже создано, просто обновляем его положение и текст, и показываем его
-            self.tooltip_window.wm_geometry(f"+{x_root + 10}+{y_root + 10}")
-            self.tooltip_window.deiconify()
-            if hasattr(self, "tooltip_label") and self.tooltip_label:
-                self.tooltip_label.config(text=text)
-            else:
-                self.tooltip_label = tk.Label(self.tooltip_window, text=text, font=self.font,
-                                              bg="#333333", fg="white", relief=tk.SOLID)
-                self.tooltip_label.pack(padx=5, pady=5)
-        else:
+        if not self.tooltip_window:  # Создаем окно только один раз
             self.tooltip_window = tk.Toplevel(self.root)
-            self.tooltip_window.wm_overrideredirect(True)
-            self.tooltip_window.wm_geometry(f"+{x_root + 10}+{y_root + 10}")
-            self.tooltip_label = tk.Label(self.tooltip_window, text=text, font=self.font,
-                                          bg="#333333", fg="white", relief=tk.SOLID)
+            self.tooltip_window.wm_overrideredirect(True)  # Убираем рамку
+            self.tooltip_label = tk.Label(self.tooltip_window, text="", font=self.font,
+                                          bg="#333333", fg="white", relief=tk.SOLID)  # Создаем label один раз
             self.tooltip_label.pack(padx=5, pady=5)
+
+        self.tooltip_label.config(text=text)  # Обновляем текст
+        self.tooltip_window.wm_geometry(f"+{x_root + 10}+{y_root + 10}")  # обновляем позицию
+        self.tooltip_window.deiconify()  # Показываем окно
 
     def remove_tooltip(self):
         """
@@ -969,6 +975,7 @@ class CSVGraphApp:
         if self.tooltip_window:
             self.tooltip_window.withdraw()
 
+    @profile_time
     def on_leave(self, _=None):
         """
         Скрывает tooltip, если мышь вышла за пределы графика.
